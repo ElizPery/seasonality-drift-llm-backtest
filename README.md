@@ -5,7 +5,7 @@
     │
     ├── .github/workflows/          # CI/CD pipelines (GitHub Actions for pytest)
     ├── data/                       # Directory for datasets
-    │   ├── raw/                    # Raw data (Alibaba, UCI Electricity, TCPDBench)
+    │   ├── raw/                    # Raw data (Alibaba, UCI Electricity, TCPDBench, SeisBench)
     │   └── processed/              # Processed and synthetically labeled series
     │
     ├── notebooks/                  # Research Jupyter Notebooks for experiments
@@ -94,3 +94,13 @@ TCPDBench (Time Series Change Point Benchmarks) contains real-world time series 
    data/raw/tcpd/
    ```
 3. The loading method in `DataLoader` will automatically read and prepare the Level 3 series for detector evaluation.
+
+### 4. SeisBench Iquique Seismic Trace Dataset
+
+SeisBench provides standardized seismic datasets for machine learning applications in seismology. The Iquique seismic trace dataset (focusing on P-wave arrivals with ground-truth change points) is used to evaluate drift and abrupt change detection under high-noise geophysical signal conditions.
+
+- **Official Source / Toolkit:** [GitHub - SeisBench/seisbench](https://github.com/seisbench/seisbench)
+- **Dataset Focus:** Iquique regional seismic network, P-wave picks, and event-based change points.
+
+#### Setup Instructions:
+1. The corresponding loading method in `DataLoader` will automatically ingest the seismic waveform slice, parse the ground-truth change points and prepare it for seasonal-trend drift evaluation.

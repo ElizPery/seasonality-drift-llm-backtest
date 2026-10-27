@@ -173,7 +173,7 @@ def run_all_baseline_detectors(data_dir: str = "data"):
                     "detected": detected,
                     "detection_delay": round(mean_delay, 2) if mean_delay is not None else None
                 })
-                print(f"[Level 3 TCPD] {method_name} on {dataset_name}: F1={f1:.2f}, Precision={precision:.2f}, Recall={recall:.2f}")
+                print(f"[Level 3] {method_name} on {dataset_name}: F1={f1:.2f}, Precision={precision:.2f}, Recall={recall:.2f}")
 
 
     # Save results summary

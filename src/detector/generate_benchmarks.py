@@ -146,6 +146,35 @@ def generate_all_benchmarks(data_dir: str = "data"):
         except Exception as e:
             print(f"  [Skipped TCPD '{tcpd_name}'] {e}")
 
+    # -------------------------------------------------------------------------
+    # Level 3: Seismic Datasets (P & S Wave Change Points)
+    # -------------------------------------------------------------------------
+    print("\n[Level 3] Processing SeisBench Iquique Benchmark...")
+    
+    try:
+        seismic_df, gt_cps = loader.load_seismic_dataset(seed=42)
+        
+        level3_filename = "level3_seismic_iquique_random.csv"
+        level3_path = processed_dir / level3_filename
+        seismic_df.to_csv(level3_path, index=False)
+
+        gt_timestamps = [str(seismic_df.loc[idx, "timestamp"]) for idx in gt_cps if idx < len(seismic_df)]
+
+        metadata_catalog.append({
+            "dataset_name": "seismic_iquique_random",
+            "level": 3,
+            "filename": level3_filename,
+            "drift_type": "seismic_single_wave_arrival",
+            "magnitude_sigma": None,
+            "change_point_indices": gt_cps,
+            "change_point_timestamps": gt_timestamps,
+            "seasonality_period": "Not applicable"
+        })
+        print(f"  -> Saved [Seismic Iquique] benchmark with change point index: {gt_cps}")
+
+    except Exception as e:
+        print(f"  [Skipped Seismic Iquique Benchmark] {e}")
+
     # Save benchmark metadata manifest
     manifest_path = processed_dir / "benchmark_manifest.json"
     with open(manifest_path, "w") as f:

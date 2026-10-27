@@ -14,8 +14,10 @@ import os
 import json
 import urllib.request
 from pathlib import Path
+from seisbench.data import Iquique
 from typing import Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import pandas as pd
 
 
@@ -213,3 +215,85 @@ class DataLoader:
             ground_truth_cp = sorted(list(cp_set))
 
         return df, ground_truth_cp
+
+    def load_seismic_dataset(
+        self, 
+        seed: int = None
+    ) -> Tuple[pd.DataFrame, List[int]]:
+        """
+        Loads the SeisBench Iquique dataset, randomly picks a trace with valid P and S arrivals.
+        - If 'P' is chosen: clips from [start -> S_wave_idx], keeping the P-wave inside and making S the boundary.
+        - If 'S' is chosen: clips from [P_wave_idx -> end], making P the start of the new series and keeping S inside.
+        
+        :param seed: Optional random seed for reproducibility.
+        :return: (Standardized DataFrame with columns ['timestamp', 'value'], list containing the chosen wave index)
+        """
+        if seed is not None:
+            np.random.seed(seed)
+
+        # 1. Load Iquique dataset from SeisBench
+        dataset = Iquique()
+        
+        # Define pick sample columns
+        p_col = "trace_P_arrival_sample"
+        s_col = "trace_S_arrival_sample"
+        
+        # 2. Filter metadata for rows where both P and S arrivals are valid (not NaN)
+        valid_mask = dataset.metadata[p_col].notna() & dataset.metadata[s_col].notna()
+        valid_indices = np.where(valid_mask)[0]
+        
+        if len(valid_indices) == 0:
+            raise ValueError("No traces with both valid P and S arrivals found in the Iquique dataset.")
+            
+        # 3. Randomly select one trace index
+        chosen_idx = np.random.choice(valid_indices)
+        
+        # Extract metadata row and waveform data
+        row = dataset.metadata.iloc[chosen_idx]
+        waveform = dataset.get_waveforms(chosen_idx)  # Shape usually (components, samples) or (samples,)
+        
+        # If multi-component (e.g., 3 channels), take the first component or norm/mean
+        if waveform.ndim > 1:
+            signal_values = waveform[0]  # Take first component (e.g., vertical component)
+        else:
+            signal_values = waveform
+            
+        p_idx = int(row[p_col])
+        s_idx = int(row[s_col])
+        
+        # 4. Randomly choose between P wave or S wave focus
+        # chosen_wave_type = np.random.choice(["P", "S"])
+        chosen_wave_type = np.random.choice(["P"])
+
+        start_time_col = "trace_start_time" if "trace_start_time" in row else None
+        delta_seconds = 0.01  # Adjust according to dataset's sampling rate (e.g., 100 Hz)
+        
+        if chosen_wave_type == "P":
+            # Clip from start of series to the start of S wave
+            # This contains the P-wave, and S acts as the cut-off boundary at the end
+            signal_values = signal_values[:s_idx]
+            change_point_idx = p_idx  # P-wave remains at its relative index
+            start_dt = pd.to_datetime(row[start_time_col]) if (start_time_col and pd.notna(row[start_time_col])) else pd.Timestamp("2026-01-01")
+        else:
+            # Clip from the start of P wave to the end of the series
+            # P-wave shifts to index 0, and S-wave shifts forward by p_idx
+            signal_values = signal_values[p_idx:]
+            change_point_idx = s_idx - p_idx  # S-wave's new relative index
+            
+            # Offset start timestamp by P wave arrival time
+            base_dt = pd.to_datetime(row[start_time_col]) if (start_time_col and pd.notna(row[start_time_col])) else pd.Timestamp("2026-01-01")
+            start_dt = base_dt + pd.Timedelta(seconds=p_idx * delta_seconds)
+
+        # 5. Construct timestamps for the clipped signal length
+        timestamps = pd.date_range(start=start_dt, periods=len(signal_values), freq=f"{int(delta_seconds * 1000)}ms")
+
+        df = pd.DataFrame({
+            "timestamp": timestamps,
+            "value": signal_values
+        })
+        
+        ground_truth_cps = [change_point_idx]
+        
+        print(f"Loaded SeisBench Iquique trace #{chosen_idx}. Focus: {chosen_wave_type}-wave. Ground-truth CP index: {change_point_idx}")
+        
+        return df, ground_truth_cps
