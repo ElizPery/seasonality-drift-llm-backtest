@@ -1,11 +1,11 @@
 """
 Benchmark Generation Script for Seasonality-Aware Drift Detection System.
 
-Applies the Semi-Synthetic Drift Injection Framework (Levels 1 & 2) 
-primarily on Alibaba Cluster Trace and UCI Electricity datasets.
+Supports a 3-Level Benchmark Architecture:
 
-Level 1: Drift-free series (Block Bootstrap on residuals) for FAR evaluation.
-Level 2: Semi-synthetic drift injection across multiple magnitudes (0.5σ to 3σ) and drift types.
+- Level 1: Drift-free clean baselines (Alibaba & UCI Electricity)
+- Level 2: Controlled Semi-Synthetic Drift Injections (Alibaba & UCI Electricity)
+- Level 3: Real-world TCPD benchmarks with consensus ground-truth annotations
 """
 
 import json
@@ -20,7 +20,7 @@ from src.detector.drift_generator import DriftGenerator
 
 def generate_all_benchmarks(data_dir: str = "data"):
     """
-    Generate Level 1 and Level 2 benchmarks for primary datasets (Alibaba & UCI Electricity).
+    Generate Level 1, Level 2, and Level 3 benchmarks.
     
     :param data_dir: Path to base data directory containing raw and processed folders.
     """
@@ -28,7 +28,7 @@ def generate_all_benchmarks(data_dir: str = "data"):
     processed_dir = Path(data_dir) / "processed"
     processed_dir.mkdir(parents=True, exist_ok=True)
 
-    print("=== Starting Benchmark Generation (Level 1 & Level 2) ===")
+    print("=== Starting 3-Level Benchmark Generation ===")
 
     # Target parameters for Level 2 semi-synthetic drift injection
     drift_types = ["abrupt", "gradual", "seasonal_amplitude"]
@@ -36,8 +36,11 @@ def generate_all_benchmarks(data_dir: str = "data"):
 
     metadata_catalog: List[Dict[str, Any]] = []
 
+    # -------------------------------------------------------------------------
+    # Levels 1 & 2: Alibaba Cluster Trace & UCI Electricity (Synthetic Framework)
+    # -------------------------------------------------------------------------
     # Map target dataset names to their loader methods and seasonality periods
-    datasets_to_process = [
+    synthetic_datasets = [
         {
             "name": "alibaba_cluster_trace",
             "seasonality_period": 288,  # 5-min intervals over 24h (288 steps per day)
@@ -50,27 +53,21 @@ def generate_all_benchmarks(data_dir: str = "data"):
         },
     ]
 
-    for ds_info in datasets_to_process:
+    for ds_info in synthetic_datasets:
         ds_name = ds_info["name"]
         period = ds_info["seasonality_period"]
 
-        print(f"\nProcessing primary dataset: '{ds_name}'...")
+        print(f"\n[Levels 1 & 2] Processing dataset: '{ds_name}'...")
 
         try:
             raw_df = ds_info["loader_func"]()
         except FileNotFoundError as err:
             print(f"  [Skipped] {err}")
-            print(f"  Falling back to TCPD sample datasets for testing pipeline...")
-            # Fallback to TCPD dataset if local raw file isn't placed in data/raw/ yet
-            ds_name = "tcpd_occupancy"
-            period = 90
-            raw_df = loader.load_tcpd_series("occupancy")
+            continue
 
         generator = DriftGenerator(raw_df, seasonality_period=period)
 
-        # ---------------------------------------------------------------------
         # Level 1: Generate Drift-Free Baseline Series (FAR Evaluation)
-        # ---------------------------------------------------------------------
         level1_df = generator.generate_level1_baseline()
         level1_filename = f"level1_clean_{ds_name}.csv"
         level1_path = processed_dir / level1_filename
@@ -87,9 +84,7 @@ def generate_all_benchmarks(data_dir: str = "data"):
         })
         print(f"  [Level 1] Saved drift-free series -> {level1_filename}")
 
-        # ---------------------------------------------------------------------
         # Level 2: Controlled Semi-Synthetic Drift Injections
-        # ---------------------------------------------------------------------
         change_idx = len(raw_df) // 2  # Change point placed at 50% length
 
         for d_type in drift_types:
@@ -117,12 +112,46 @@ def generate_all_benchmarks(data_dir: str = "data"):
                 })
                 print(f"  [Level 2] Saved {d_type} drift ({mag}σ) -> {level2_filename}")
 
+    # -------------------------------------------------------------------------
+    # Level 3: TCPD Real-World Benchmarks with Consensus Annotations
+    # -------------------------------------------------------------------------
+    print("\n[Level 3] Processing TCPD Real-World Annotated Datasets...")
+    
+    tcpd_targets = ["jfk_passengers"]  # TCPD benchmark series names
+
+    for tcpd_name in tcpd_targets:
+        try:
+            tcpd_df, ground_truth_cps = loader.load_tcpd_annotated_series(tcpd_name, annotator_key="10")
+            period = "Not defined"  # Estimated domain periodicity or configured default
+
+            level3_filename = f"level3_tcpd_{tcpd_name}.csv"
+            level3_path = processed_dir / level3_filename
+            tcpd_df.to_csv(level3_path, index=False)
+
+            # Map timestamps for ground truth change point indices
+            gt_timestamps = [str(tcpd_df.loc[idx, "timestamp"]) for idx in ground_truth_cps if idx < len(tcpd_df)]
+
+            metadata_catalog.append({
+                "dataset_name": f"tcpd_{tcpd_name}",
+                "level": 3,
+                "filename": level3_filename,
+                "drift_type": "real_consensus_annotation",
+                "magnitude_sigma": None,
+                "change_point_indices": ground_truth_cps,
+                "change_point_timestamps": gt_timestamps,
+                "seasonality_period": period
+            })
+            print(f"  -> Level 3 saved [TCPD {tcpd_name}] with {len(ground_truth_cps)} ground-truth change points.")
+
+        except Exception as e:
+            print(f"  [Skipped TCPD '{tcpd_name}'] {e}")
+
     # Save benchmark metadata manifest
     manifest_path = processed_dir / "benchmark_manifest.json"
     with open(manifest_path, "w") as f:
         json.dump(metadata_catalog, f, indent=4)
 
-    print(f"\nSuccessfully generated benchmarks! Manifest saved to: {manifest_path}")
+    print(f"\n3-Level Benchmark Generation Complete! Manifest saved to: {manifest_path}")
 
 
 if __name__ == "__main__":

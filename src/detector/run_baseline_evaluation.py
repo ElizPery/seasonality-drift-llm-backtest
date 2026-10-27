@@ -1,7 +1,7 @@
 """
 Baseline Evaluation Script.
-Runs classic detectors (KS, PSI, Wasserstein, ADWIN, Page-Hinkley, Kswin) on raw data (Level 1 & Level 2 benchmarks)
-without seasonality consideration to record baseline metrics (FAR, Delay, F1).
+Runs classic detectors (KS, PSI, Wasserstein, ADWIN, Page-Hinkley, Kswin) on raw data 
+across a 3-Level Benchmark Architecture (Level 1, Level 2, and Level 3).
 """
 
 import json
@@ -37,7 +37,7 @@ def run_all_baseline_detectors(data_dir: str = "data"):
 
     results = []
 
-    print("=== Starting Baseline Detector Evaluation (Raw Data) ===")
+    print("=== Starting Baseline Detector Evaluation (3-Level Benchmark) ===")
 
     for item in manifest:
         file_path = processed_dir / item["filename"]
@@ -119,6 +119,61 @@ def run_all_baseline_detectors(data_dir: str = "data"):
                     "recall": round(recall, 2),
                     "f1_score": round(f1, 2)
                 })
+
+            elif level == 3:
+                ground_truth_cps = item.get("change_point_indices", [])
+                tolerance_window = 40  # Tolerance margin around each ground truth point
+
+                tp = 0
+                fp = 0
+                matched_gt = set()
+                delays = []
+
+                for det in sorted(alert_indices):
+                    if not ground_truth_cps:
+                        fp += 1
+                        continue
+
+                    # Find valid matches where detection occurs AFTER or AT the change point
+                    # within the forward-looking tolerance window [gt, gt + tolerance_window]
+                    valid_matches = []
+                    for gt in ground_truth_cps:
+                        if gt not in matched_gt and 0 <= (det - gt) <= tolerance_window:
+                            valid_matches.append((gt, det - gt))
+
+                    if valid_matches:
+                        # Pick the closest valid ground truth point
+                        valid_matches.sort(key=lambda x: x[1])
+                        matched_gt_point, delay = valid_matches[0]
+                        
+                        tp += 1
+                        matched_gt.add(matched_gt_point)
+                        delays.append(delay)
+                    else:
+                        fp += 1
+
+                fn = len(ground_truth_cps) - len(matched_gt)
+
+                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+                mean_delay = float(np.mean(delays)) if delays else None
+
+                detected = 1 if len(matched_gt) > 0 else 0
+
+                results.append({
+                    "dataset": dataset_name,
+                    "level": 3,
+                    "drift_type": item["drift_type"],
+                    "magnitude": 0.0,
+                    "method": method_name,
+                    "precision": round(precision, 2),
+                    "recall": round(recall, 2),
+                    "f1_score": round(f1, 2),
+                    "detected": detected,
+                    "detection_delay": round(mean_delay, 2) if mean_delay is not None else None
+                })
+                print(f"[Level 3 TCPD] {method_name} on {dataset_name}: F1={f1:.2f}, Precision={precision:.2f}, Recall={recall:.2f}")
 
 
     # Save results summary

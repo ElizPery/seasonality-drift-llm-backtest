@@ -5,7 +5,7 @@
     │
     ├── .github/workflows/          # CI/CD pipelines (GitHub Actions for pytest)
     ├── data/                       # Directory for datasets
-    │   ├── raw/                    # Raw data (Alibaba, UCI Electricity)
+    │   ├── raw/                    # Raw data (Alibaba, UCI Electricity, TCPDBench)
     │   └── processed/              # Processed and synthetically labeled series
     │
     ├── notebooks/                  # Research Jupyter Notebooks for experiments
@@ -14,7 +14,7 @@
     ├── src/                        # Core service source code
     │   ├── __init__.py
     │   ├── detector/               # Stream A: Drift detectors and decomposition
-    │   │   ├── data_loader.py          # Data loading and standardization
+    │   │   ├── data_loader.py          # Data loading and standardization (Alibaba, UCI, TCPDBench)
     │   │   ├── drift_generator.py      # STL decomposition + 3-level benchmark generation
     │   │   ├── baseline_detectors.py   # KS, PSI, ADWIN, Page-Hinkley, KSWIN (River / SciPy)
     │   │   ├── generate_benchmarks.py
@@ -79,3 +79,18 @@ The raw Alibaba trace is large and resource-intensive to parse from scratch. For
    data/raw/alibaba_cluster_trace.csv
    ```
 4. The `load_alibaba_standard_trace()` method in `DataLoader` will automatically parse this aggregated CPU/memory usage trace.
+
+### 3. TCPDBench Dataset (`jfk_passengers` / Level 3 Benchmark)
+
+TCPDBench (Time Series Change Point Benchmarks) contains real-world time series datasets with various change points and conceptual drift, which serve as the Level 3 benchmark for validating drift detectors.
+
+- **Official Repository:** [GitHub - TCPDBench/TCPDBench](https://github.com/TimeSeriesAI/TCPDBench)
+- **Target File:** E.g., `jfk_passengers.csv` or specific series files from the benchmark repository.
+
+#### Setup Instructions:
+1. Download the required time series files from the TCPDBench repository.
+2. Place them into your project's raw data directory:
+   ```path
+   data/raw/tcpd/
+   ```
+3. The loading method in `DataLoader` will automatically read and prepare the Level 3 series for detector evaluation.

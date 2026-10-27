@@ -11,9 +11,10 @@ All datasets are returned as standardized pandas DataFrames with a unified forma
 """
 
 import os
+import json
 import urllib.request
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 
@@ -138,3 +139,77 @@ class DataLoader:
             )
 
         return res_df
+
+    # -------------------------------------------------------------------------
+    # 3. Time-Series Change Point Detection (TCPD) benchmark datasets Loader
+    # -------------------------------------------------------------------------
+    def load_tcpd_series(self, dataset_name: str = "jfk_passengers", frequency: str = "1min") -> pd.DataFrame:
+        """
+        Load Time-Series Change Point Detection (TCPD) benchmark datasets.
+        
+        :param dataset_name: Name of the TCPD series ('jfk_passengers', etc.)
+        :param frequency: Frequency of the time-series data.
+        :return: Standardized DataFrame with columns ['timestamp', 'value'].
+        """
+        file_path = f"{self.base_dir}/raw/tcpd/{dataset_name}.csv"
+    
+        try:
+            df = pd.read_csv(file_path)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"TCPD dataset file not found at {file_path}")
+
+        # Ensure standardized columns
+        if "timestamp" not in df.columns:
+            df["timestamp"] = pd.date_range(start="2020-01-01", periods=len(df), freq=frequency)
+        if "value" not in df.columns:
+            # Fallback to the first numeric column if 'value' is missing
+            numeric_cols = df.select_dtypes(include='number').columns
+            df["value"] = df[numeric_cols[0]]
+            
+        return df[["timestamp", "value"]]
+
+    def load_tcpd_annotated_series(
+        self, 
+        dataset_name: str = "jfk_passengers", 
+        frequency: str = "1min", 
+        annotator_key: str = None
+    ) -> Tuple[pd.DataFrame, List[int]]:
+        """
+        Load TCPD dataset along with its human ground-truth change-point annotations 
+        from 'data/raw/tcpd/annotations.json'.
+        
+        :param dataset_name: Name of the dataset (e.g., 'jfk_passengers').
+        :param frequency: Time frequency for the datetime index.
+        :param annotator_key: Specific annotator version key (e.g. '9'). 
+                              If None, computes the union of all annotators or defaults to a consensus list.
+        :return: (DataFrame with ['timestamp', 'value'], list of change point index positions)
+        """
+        # 1. Load the time series
+        df = self.load_tcpd_series(dataset_name, frequency)
+
+        # 2. Load annotations.json from data/raw/
+        annotation_path = self.raw_dir / "tcpd" / "annotations.json"
+        if not annotation_path.exists():
+            raise FileNotFoundError(f"Annotations file not found at {annotation_path}")
+
+        with open(annotation_path, "r") as f:
+            all_annotations = json.load(f)
+
+        if dataset_name not in all_annotations:
+            raise ValueError(f"Dataset '{dataset_name}' not found in annotations.json")
+
+        dataset_annotations = all_annotations[dataset_name]
+
+        # 3. Extract change point indices
+        if annotator_key and annotator_key in dataset_annotations:
+            # Pick a specific annotator profile
+            ground_truth_cp = dataset_annotations[annotator_key]
+        else:
+            # Default behavior: Combine all unique indices across all annotators (Union consensus)
+            cp_set = set()
+            for key, points in dataset_annotations.items():
+                if isinstance(points, list):
+                    cp_set.update(points)
+            ground_truth_cp = sorted(list(cp_set))
+
+        return df, ground_truth_cp
