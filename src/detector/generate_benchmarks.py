@@ -3,9 +3,9 @@ Benchmark Generation Script for Seasonality-Aware Drift Detection System.
 
 Supports a 3-Level Benchmark Architecture:
 
-- Level 1: Drift-free clean baselines (Alibaba & UCI Electricity)
+- Level 1: Drift-free clean baselines (Alibaba, UCI Electricity, TCPD, SeisBench) for FAR evaluation.
 - Level 2: Controlled Semi-Synthetic Drift Injections (Alibaba & UCI Electricity)
-- Level 3: Real-world TCPD benchmarks with consensus ground-truth annotations
+- Level 3: Real-world TCPD and SeisBench benchmarks with consensus ground-truth annotations
 """
 
 import json
@@ -111,6 +111,49 @@ def generate_all_benchmarks(data_dir: str = "data"):
                     "seasonality_period": period
                 })
                 print(f"  [Level 2] Saved {d_type} drift ({mag}σ) -> {level2_filename}")
+
+    # -------------------------------------------------------------------------
+    # Level 1 ONLY: TCPD & SeisBench Clean Baselines (For FAR Evaluation)
+    # -------------------------------------------------------------------------
+    level1_only_datasets = [
+        {
+            "name": "tcpd_jfk_passengers",
+            "seasonality_period": 12,
+            "loader_func": lambda: loader.load_tcpd_annotated_series("jfk_passengers", annotator_key="10")[0],
+        },
+        {
+            "name": "seismic_iquique_trace",
+            "seasonality_period": 50,
+            "loader_func": lambda: loader.load_seismic_dataset(seed=42)[0],
+        },
+    ]
+
+    for ds_info in level1_only_datasets:
+        ds_name = ds_info["name"]
+        period = ds_info["seasonality_period"]
+
+        print(f"\n[Level 1 Only] Processing clean baseline for: '{ds_name}'...")
+        try:
+            raw_df = ds_info["loader_func"]()
+            generator = DriftGenerator(raw_df, seasonality_period=period)
+            
+            level1_df = generator.generate_level1_baseline()
+            level1_filename = f"level1_clean_{ds_name}.csv"
+            level1_path = processed_dir / level1_filename
+            level1_df.to_csv(level1_path, index=False)
+
+            metadata_catalog.append({
+                "dataset_name": ds_name,
+                "level": 1,
+                "filename": level1_filename,
+                "drift_type": "none",
+                "magnitude_sigma": 0.0,
+                "change_point_idx": None,
+                "seasonality_period": period
+            })
+            print(f"  [Level 1] Saved clean baseline -> {level1_filename}")
+        except Exception as err:
+            print(f"  [Skipped Level 1 for {ds_name}] {err}")
 
     # -------------------------------------------------------------------------
     # Level 3: TCPD Real-World Benchmarks with Consensus Annotations
