@@ -29,7 +29,7 @@
     │   │   ├── data_sources.py     # ENTSO-E national load and seismic noise (March 2020 measures)
     │   │   ├── plots.py            # Figures for the stream B notebook
     │   │   ├── run_backtest.py     # Stream B runner
-    │   │   └── llm_client.py       # Instructor + Pydantic v2 schemas for LLM (planned)
+    │   │   └── llm_client.py       # Instructor + Pydantic v2 schemas for LLM
     │   │
     │   ├── api/                    # MLOps microservice
     │   │   ├── __init__.py
@@ -156,6 +156,9 @@ decides when the model is changed and how:
 - `nothing`: the model trained at deployment is never changed;
 - `always`: retrain on all history every day;
 - `scheduled`: retrain on all history once a week;
+- `scheduled_gate`: once a week, retrain on all history only if the acceptance rule confirms the gain;
+- `catalog_gate`: once a week, check every catalog action with the acceptance rule and apply the one with the highest
+  lower bound of the gain (or keep the model if none passes);
 - `oracle_weekly`: once a week, apply the catalog action with the lowest error on the following week, chosen in
   hindsight (the reference for LLM recommendations);
 - `oracle`: the same every day with a one-day lookahead (the ideal ceiling).
@@ -167,7 +170,21 @@ level on the last week.
 
 Metrics: MASE (scaled by the weekly seasonal naive error on the training data) before and after the change, regret
 against the ideal oracle, number of retrainings, and the gain over `nothing` with a 95% moving block bootstrap
-interval over days (blocks of 7 days, 2000 resamples), which is the basis of the acceptance rule of the backtest.
+interval over days (blocks of 7 days, 2000 resamples).
+
+Acceptance rule (`check_action` in `backtester.py`): at a decision point the recommended action is replayed on the
+last 2 weeks with a weekly rolling origin (its recipe is applied to the data before each origin and forecasts the
+following week) and compared with what the deployed model actually forecast there. The action is applied only if the
+lower bound of the 95% block bootstrap interval of the gain (blocks of 3 days) is above delta = 0. Only data before
+the decision point is used.
+
+LLM recommendations (`llm_client.py`): at a decision point the advisor gets diagnostics computed from the data before
+it (weekly errors of the deployed model, bias, level, daily amplitude and noise changes, weeks since the last change)
+and answers with one catalog action and a short reason (Pydantic schema, validated by Instructor in JSON mode).
+Strategies `llm` (applied as proposed) and `llm_gate` (applied only if the acceptance rule confirms it); `rules` and
+`rules_gate` use fixed rules on the same diagnostics. Every LLM answer is stored in
+`data/llm_answers/` (kept in git), so a rerun reads the stored answers and needs no API key. The key is read from
+`~/.config/diploma/anthropic.env` (one line `ANTHROPIC_API_KEY=...`, another path can be set in `LLM_KEY_FILE`).
 
 Data: 240 synthetic series (20 UCI clients x 3 seeds x {no change, level shift 2 sigma, one-week ramp 2 sigma,
 noise x2}, 24 weeks, deployment at week 10, change at week 13), the national load of 8 countries (dataset 5,
@@ -180,6 +197,7 @@ export OMP_NUM_THREADS=1                                     # every process tra
 python -m src.recommendations.run_backtest --tune            # base model validation (not the test period)
 python -m src.recommendations.run_backtest                   # all sources, about 40 minutes on 16 cores
 python -m src.recommendations.run_backtest --sources seismic # recompute one source, keep the other rows
+python -m src.recommendations.run_backtest --advisors rules  # add the advised strategies (rules, llm) to runs.csv
 python -m pytest tests                                       # tests
 ```
 
