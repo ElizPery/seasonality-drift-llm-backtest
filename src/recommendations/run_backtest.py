@@ -6,6 +6,8 @@ on synthetic UCI series, ENTSO-E national load and seismic noise.
     python -m src.recommendations.run_backtest                     # all sources (about 40 min on 16 cores)
     python -m src.recommendations.run_backtest --sources seismic   # recompute one source, keep the other rows
     python -m src.recommendations.run_backtest --report            # rebuild the summaries without recomputing
+    python -m src.recommendations.run_backtest --advisors rules    # add the advised strategies (rules, llm) to runs.csv
+    python -m src.recommendations.run_backtest --strata            # seasonal strength and group of every series
 
 Results go to data/processed/stream_b/ as CSV; the figures are drawn in notebooks/02_stream_b_baselines.ipynb.
 Set OMP_NUM_THREADS=1: every process trains its own models, and extra threads only compete for the same cores.
@@ -18,10 +20,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.recommendations.backtester import STRATEGIES, backtest, oracle_picks, run_backtests, sort_runs, summarize, tune_base_model
+from src.recommendations.backtester import (ADVISED_STRATEGIES, STRATEGIES, backtest, oracle_picks, run_backtests, sort_runs,
+                                            summarize, tune_base_model)
 from src.recommendations.data_sources import entsoe_series, seismic_series
 from src.recommendations.forecast import LGBM_PARAMS, WEEK, mase_scale
 from src.recommendations.plots import example_frame
+from src.recommendations.strata import strata_table
 from src.recommendations.synthetic import SYN_DEPLOY_WEEK, fit_models, synthetic_series
 
 ENTSOE_FILE = Path("data/raw/opsd/time_series_60min_singleindex.csv")
@@ -84,6 +88,10 @@ def main():
     p.add_argument("--sources", default=None,
                    help="comma-separated subset of entsoe,seismic,synthetic to recompute; rows of the other sources in runs.csv are kept")
     p.add_argument("--report", action="store_true", help="rebuild the summaries from runs.csv without recomputing")
+    p.add_argument("--advisors", default=None,
+                   help="comma-separated advisors (rules, llm): compute only their strategies and replace their rows in runs.csv")
+    p.add_argument("--llm-model", default=None, help='Instructor model string, e.g. "anthropic/claude-haiku-5-5"')
+    p.add_argument("--strata", action="store_true", help="write strata.csv: seasonal strength and group of every series")
     args = p.parse_args()
 
     t = time.time()
@@ -101,8 +109,20 @@ def main():
     todo = set(args.sources.split(",")) if args.sources else set(SOURCES)
     if todo - set(SOURCES):
         raise SystemExit(f"unknown sources: {', '.join(sorted(todo - set(SOURCES)))}")
+    advisors = tuple(args.advisors.split(",")) if args.advisors else ()
+    if set(advisors) - {"rules", "llm"}:
+        raise SystemExit(f"unknown advisors: {', '.join(sorted(set(advisors) - {'rules', 'llm'}))}")
+    if advisors and not (out / "runs.csv").exists():
+        raise SystemExit("run the reference strategies first: the advised ones are added to an existing runs.csv")
     if args.tune:
         run_tune(models, real, args.processes, out)
+        return
+    if args.strata:
+        series = (entsoe_series(str(ENTSOE_FILE)) if real else []) + (seismic_series(str(SEISMIC_DIR)) if seismic else [])
+        series += synthetic_series(models(), list(range(args.seeds)))
+        st = strata_table(series)
+        st.to_csv(out / "strata.csv", index=False)
+        print(st.groupby(["source", "group"]).size().unstack(fill_value=0).to_string())
         return
     if not args.report:
         # the long ENTSO-E series go first, so they run alongside the shorter ones
@@ -111,8 +131,18 @@ def main():
         series += synthetic_series(models(), list(range(args.seeds))) if "synthetic" in todo else []
         if not series:
             raise SystemExit("no series to compute: the data of the listed sources is missing")
-        runs = run_backtests(series, args.processes, log=sys.stderr)
-        if args.sources and (out / "runs.csv").exists():  # only the listed sources were recomputed: keep the others
+        if advisors:
+            # "nothing" is the reference of the gains; it is recomputed and dropped, the stored rows are kept
+            strategies = (STRATEGIES[0],) + tuple(st for st in ADVISED_STRATEGIES if st.advisor in advisors)
+            new = run_backtests(series, args.processes, log=sys.stderr, strategies=strategies, advisors=advisors,
+                                llm_model=args.llm_model)
+            new = new[new.strategy.isin([st.name for st in strategies[1:]])]
+            prev = pd.read_csv(out / "runs.csv", float_precision="round_trip")
+            same = prev.source.isin(new.source.unique()) & prev.strategy.isin(new.strategy.unique())
+            runs = sort_runs(pd.concat([prev[~same], new], ignore_index=True))
+        else:
+            runs = run_backtests(series, args.processes, log=sys.stderr)
+        if args.sources and not advisors and (out / "runs.csv").exists():  # only the listed sources were recomputed
             prev = pd.read_csv(out / "runs.csv", float_precision="round_trip")  # unchanged rows stay byte-identical
             runs = sort_runs(pd.concat([prev[~prev.source.isin(runs.source.unique())], runs], ignore_index=True))
         runs.to_csv(out / "runs.csv", index=False)

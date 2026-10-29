@@ -18,7 +18,10 @@ STYLE = {
 
 LINE = {"nothing": "#2a78d6", "scheduled": "#eb6834", "oracle": "#1baf7a"}  # validated categorical slots 1-3
 LABEL = {"naive": "seasonal naive", "nothing": "do nothing", "always": "always retrain (daily)",
-         "scheduled": "scheduled (weekly)", "oracle_weekly": "oracle, weekly", "oracle": "oracle, daily (ideal)"}
+         "scheduled": "scheduled (weekly)", "scheduled_gate": "scheduled + backtest check",
+         "catalog_gate": "best checked action (weekly)", "rules": "rules, no check", "rules_gate": "rules + backtest check",
+         "llm": "LLM, no check", "llm_gate": "LLM + backtest check", "oracle_weekly": "oracle, weekly",
+         "oracle": "oracle, daily (ideal)"}
 PANEL = {("synthetic", "none"): "Synthetic: no change", ("synthetic", "level_shift"): "Synthetic: level shift 2 sigma",
          ("synthetic", "trend_ramp"): "Synthetic: 1-week ramp 2 sigma", ("synthetic", "variance"): "Synthetic: noise x2",
          ("entsoe", "lockdown_2020"): "ENTSO-E, 8 countries: March 2020",

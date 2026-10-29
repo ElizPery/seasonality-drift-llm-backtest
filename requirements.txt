@@ -11,6 +11,9 @@ matplotlib
 # Stream B: forecasting model and backtest
 lightgbm>=4.3
 pyarrow
+pydantic>=2.8
+instructor==1.17.0
+anthropic==0.93.0  # the version instructor 1.17.0 is tested with
 
 # Tests and notebooks
 pytest

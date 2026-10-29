@@ -3,7 +3,7 @@ Run from the repository root: python -m pytest tests"""
 import numpy as np
 import pandas as pd
 
-from src.recommendations.backtester import STRATEGIES, backtest, mase, mase_gain_ci
+from src.recommendations.backtester import STRATEGIES, VAL_WEEKS, backtest, check_action, make_actor, mase, mase_gain_ci
 from src.recommendations.catalog import ACTIONS, CATALOG, apply_action
 from src.recommendations.data_sources import seismic_series
 from src.recommendations.forecast import BASE_FEATURES, DAY, WEEK, Model, calendar_from_index, feature_table, mase_scale
@@ -61,6 +61,43 @@ def test_mase_gain_ci_sign():
     assert g > 0 and lo > 0 and lo <= g <= hi
     g, lo, hi = mase_gain_ci(y, perfect, biased, T_DEPLOY, T_DEPLOY + 4 * WEEK, scale=mase_scale(y[:T_DEPLOY]))
     assert g < 0 and hi < 0
+
+
+def test_check_action_accepts_only_a_confirmed_gain_and_does_not_look_ahead():
+    y, F = toy()
+    T = T_DEPLOY + 3 * WEEK
+    scale = mase_scale(y[:T_DEPLOY])
+    act = make_actor(F, y, BASE_FEATURES)
+    model, _ = act(ACTIONS["retrain_full"], Model(BASE_FEATURES), T_DEPLOY)
+    biased, perfect = y + 15.0, y.copy()  # what the deployed model forecast before T
+    for name in ("retrain_full", "recalibrate_level"):
+        c = check_action(ACTIONS[name], model, y, F, biased, T, scale, act)
+        assert c["accepted"] and c["lo"] > 0, name
+        assert not check_action(ACTIONS[name], model, y, F, perfect, T, scale, act)["accepted"], name
+    # the check at T uses data before T only
+    y2 = y.copy()
+    y2[T:] += 1000.0
+    hour, dow = calendar_from_index(N)
+    F2 = feature_table(y2, hour, dow)
+    c2 = check_action(ACTIONS["retrain_2w"], model, y2, F2, biased, T, scale, make_actor(F2, y2, BASE_FEATURES))
+    c1 = check_action(ACTIONS["retrain_2w"], model, y, F, biased, T, scale, act)
+    assert c1 == c2
+
+
+def test_gated_strategies_decide_after_the_check_window_and_retrain_less():
+    y, F = toy(shift=15)
+    by = {s.name: s for s in STRATEGIES}
+    cache = {}
+    r = {k: backtest(y, F, T_DEPLOY, by[k], BASE_FEATURES, cache=cache)
+         for k in ("nothing", "scheduled", "scheduled_gate", "catalog_gate")}
+    end = r["nothing"]["end"]
+    weekly = [k for k in range(1, (end - T_DEPLOY) // DAY) if k % 7 == 0]
+    assert r["scheduled_gate"]["decisions"] == sum(k * DAY >= VAL_WEEKS * WEEK for k in weekly)
+    assert r["scheduled_gate"]["retrains"] == r["scheduled_gate"]["accepted"] <= r["scheduled"]["retrains"]
+    assert 0 < r["catalog_gate"]["accepted"] <= r["catalog_gate"]["decisions"]
+    scale = mase_scale(y[:T_DEPLOY])
+    post = {k: mase(y, v["pred"], T_CHANGE, end, scale) for k, v in r.items()}
+    assert post["catalog_gate"] < post["nothing"]
 
 
 def test_seismic_series_masks_gaps_and_keeps_the_local_daily_cycle(tmp_path):
