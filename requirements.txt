@@ -1,0 +1,17 @@
+# Stream A: data, decomposition, detectors
+numpy
+pandas
+scipy
+statsmodels>=0.14
+scikit-learn
+river
+seisbench
+matplotlib
+
+# Stream B: forecasting model and backtest
+lightgbm>=4.3
+pyarrow
+
+# Tests and notebooks
+pytest
+ipykernel

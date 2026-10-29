@@ -9,7 +9,8 @@
     │   └── processed/              # Processed and synthetically labeled series
     │
     ├── notebooks/                  # Research Jupyter Notebooks for experiments
-    │   └── 01_eda_and_baselines.ipynb   
+    │   ├── 01_eda_and_baselines.ipynb
+    │   └── 02_stream_b_baselines.ipynb  # Stream B: strategies, oracles, examples
     │
     ├── src/                        # Core service source code
     │   ├── __init__.py
@@ -21,10 +22,14 @@
     │   │   └── run_baseline_evaluation.py # Baseline metric runner
     │   │
     │   ├── recommendations/        # Stream B: LLM diagnostics and backtesting
-    │   │   ├── __init__.py
-    │   │   ├── llm_client.py       # Instructor + Pydantic v2 schemas for LLM
+    │   │   ├── forecast.py         # LightGBM day-ahead model, seasonal naive, MASE
     │   │   ├── catalog.py          # Remediation action catalog
-    │   │   └── backtester.py       # Backtesting engine with block Bootstrap CI
+    │   │   ├── backtester.py       # Strategies, hindsight oracles, block bootstrap CI of the MASE gain
+    │   │   ├── synthetic.py        # Synthetic series from UCI clients (MSTL control series + injected changes)
+    │   │   ├── data_sources.py     # ENTSO-E national load and seismic noise (March 2020 measures)
+    │   │   ├── plots.py            # Figures for the stream B notebook
+    │   │   ├── run_backtest.py     # Stream B runner
+    │   │   └── llm_client.py       # Instructor + Pydantic v2 schemas for LLM (planned)
     │   │
     │   ├── api/                    # MLOps microservice
     │   │   ├── __init__.py
@@ -104,3 +109,80 @@ SeisBench provides standardized seismic datasets for machine learning applicatio
 
 #### Setup Instructions:
 1. The corresponding loading method in `DataLoader` will automatically ingest the seismic waveform slice, parse the ground-truth change points and prepare it for seasonal-trend drift evaluation.
+
+### 5. ENTSO-E National Load (Open Power System Data), Stream B
+
+Hourly national electricity load of 32 European countries, 2015 to September 2020, from the ENTSO-E Transparency
+Platform as packaged by Open Power System Data. Stream B uses 8 countries (IT, PL, ES, NL, PT, FR, DE, GB) and the
+date of the first national COVID-19 measures in March 2020 as the moment of change.
+
+- **Official Source:** [Open Power System Data - Time series](https://data.open-power-system-data.org/time_series/2020-10-06)
+- **Target File:** `time_series_60min_singleindex.csv` (124 MB)
+
+#### Setup Instructions:
+```bash
+mkdir -p data/raw/opsd
+curl -L -o data/raw/opsd/time_series_60min_singleindex.csv \
+  https://data.open-power-system-data.org/time_series/2020-10-06/time_series_60min_singleindex.csv
+```
+
+### 6. Seismic Noise During the 2020 Lockdowns (Lecocq et al., 2020), Stream B
+
+Displacement RMS every 15 minutes at seismic stations, November 2019 to May 2020, from the companion repository of
+Lecocq et al. (2020), Science 369(6509):1338-1343. The 4-14 Hz band is dominated by human activity (traffic, industry),
+so it has clear daily and weekly cycles. Stream B uses 15 stations; the moment of change is the date of the first
+measures at each station from the paper's Table S1. This is a different dataset from the SeisBench Iquique records above.
+
+- **Official Source:** [GitHub - ThomasLecocq/2020_Science_GlobalQuieting](https://github.com/ThomasLecocq/2020_Science_GlobalQuieting)
+
+#### Setup Instructions:
+```bash
+R=https://raw.githubusercontent.com/ThomasLecocq/2020_Science_GlobalQuieting/master
+mkdir -p data/raw/seismic_noise
+curl -L -o data/raw/seismic_noise/lockdown_stations.csv "$R/Supplementary%20Files/Table%20S1%20-%20Lockdown%20stations.csv"
+for f in BE.UCC..HHZ IV.MILN..HHZ IV.FIR..HHZ FR.CURIE.00.HHZ GB.EDI..HHZ NL.ALK1..HGZ GE.STU..HHZ GR.BUG..HHZ \
+         CA.ICJA..HHZ CH.SZUZ..HGZ OE.VIE..HHZ LD.CPNY..BHZ AM.R091F.00.EHZ AM.R9F13.00.EHZ AM.S0C34.00.EHZ; do
+  curl -L -o "data/raw/seismic_noise/$f.csv" "$R/PaperZero_RMS/$f.csv"
+done
+```
+
+
+## Stream B: Adaptation Strategies and Backtest (`src/recommendations`)
+
+A deployed LightGBM model forecasts every day the next 24 hours (all features use values at least 24 hours old:
+hour, weekday, lags 24/48/168/336, lagged daily and weekly means; yearly terms for the national load). A strategy
+decides when the model is changed and how:
+
+- `nothing`: the model trained at deployment is never changed;
+- `always`: retrain on all history every day;
+- `scheduled`: retrain on all history once a week;
+- `oracle_weekly`: once a week, apply the catalog action with the lowest error on the following week, chosen in
+  hindsight (the reference for LLM recommendations);
+- `oracle`: the same every day with a one-day lookahead (the ideal ceiling).
+
+The oracles use future data, so they cannot be deployed; they only bound what any policy can reach. Action catalog
+(`catalog.py`): do nothing, retrain on all history, retrain on the last 8 weeks, shorten the window to 2 weeks,
+reweight recent data (half-life 1 week), add a seasonal feature (4-week hour-of-week profile), recalibrate the forecast
+level on the last week.
+
+Metrics: MASE (scaled by the weekly seasonal naive error on the training data) before and after the change, regret
+against the ideal oracle, number of retrainings, and the gain over `nothing` with a 95% moving block bootstrap
+interval over days (blocks of 7 days, 2000 resamples), which is the basis of the acceptance rule of the backtest.
+
+Data: 240 synthetic series (20 UCI clients x 3 seeds x {no change, level shift 2 sigma, one-week ramp 2 sigma,
+noise x2}, 24 weeks, deployment at week 10, change at week 13), the national load of 8 countries (dataset 5,
+deployment 6 January 2020) and the seismic noise level at 15 stations (dataset 6, hourly log10 on the local clock,
+deployment 3 February 2020).
+
+#### Run:
+```bash
+export OMP_NUM_THREADS=1                                     # every process trains its own models
+python -m src.recommendations.run_backtest --tune            # base model validation (not the test period)
+python -m src.recommendations.run_backtest                   # all sources, about 40 minutes on 16 cores
+python -m src.recommendations.run_backtest --sources seismic # recompute one source, keep the other rows
+python -m pytest tests                                       # tests
+```
+
+Results are written to `data/processed/stream_b/` (`runs.csv`, `summary.csv`, `oracle_picks.csv`, `tune.csv`,
+`example_*.csv`); tables and figures are in `notebooks/02_stream_b_baselines.ipynb`. The published results were
+computed with Python 3.12, numpy 2.2.6, pandas 2.3.3, statsmodels 0.15.0 and lightgbm 4.7.0.
