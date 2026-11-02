@@ -315,13 +315,18 @@ def evaluate_series(s: dict, params: dict | None = None, strategies=STRATEGIES, 
 _WORKER: dict = {}  # advisors of a worker process, created on its first series
 
 
-def _job(s, strategies=STRATEGIES, advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None):
+def _job(s, strategies=STRATEGIES, advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None,
+         detectors: tuple[str, ...] = ()):
     if advisors and "advisors" not in _WORKER:
         from src.recommendations.llm_client import DEFAULT_MODEL, LLMAdvisor, RuleAdvisor
 
         made = {"rules": RuleAdvisor, "llm": lambda: LLMAdvisor(llm_model or DEFAULT_MODEL)}
         _WORKER["advisors"] = {k: made[k]() for k in advisors}
-    return evaluate_series(s, LGBM_PARAMS, strategies, _WORKER.get("advisors"), alerts=(alerts or {}).get(series_id(s)))
+    mine = None
+    if alerts is not None:  # every detector runs on every series; one without alarms on this series gets an empty list
+        mine = alerts.get(series_id(s), {})
+        mine = {d: mine.get(d, np.array([], dtype=int)) for d in (detectors or sorted(mine))}
+    return evaluate_series(s, LGBM_PARAMS, strategies, _WORKER.get("advisors"), alerts=mine)
 
 
 def sort_runs(df: pd.DataFrame) -> pd.DataFrame:
@@ -336,7 +341,8 @@ def run_backtests(series: list[dict], processes: int | None = None, log=None, st
                   advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None) -> pd.DataFrame:
     """`alerts`: alarm positions per series id and detector (see `alarms.read_alerts`) for the alarm strategies."""
     rows = []
-    job = partial(_job, strategies=strategies, advisors=advisors, llm_model=llm_model, alerts=alerts)
+    detectors = tuple(sorted({d for per in (alerts or {}).values() for d in per}))
+    job = partial(_job, strategies=strategies, advisors=advisors, llm_model=llm_model, alerts=alerts, detectors=detectors)
     with Pool(processes) as pool:
         for i, rs in enumerate(pool.imap_unordered(job, series, chunksize=1), 1):
             rows.extend(rs)

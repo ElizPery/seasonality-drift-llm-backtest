@@ -11,8 +11,11 @@ minus the median of the same hour of the last `PROFILE_WEEKS` weeks, then
   needs two consecutive violations and is followed by a one-day cooldown (the rule of the stream A detector);
 * adwin: ADWIN (Bifet and Gavalda, 2007) on the same residuals, checked at every point.
 
-The multiplier and the ADWIN delta are calibrated on the control series (scenario "none") to a target false
-alarm rate, one alarm per `TARGET_DAYS` days, so the methods are compared at the same false alarm rate.
+The multiplier and the ADWIN delta are calibrated per source on a control period without changes (synthetic:
+the control series, scenario "none"; seismic noise: the weeks between deployment and the first measures; ENTSO-E:
+the year 2019) to a target false alarm rate, one alarm per `TARGET_DAYS` days, so the methods are compared at the
+same false alarm rate. Settings calibrated on one source do not carry over to another (checked on 02.11.2026:
+the synthetic settings gave 6 times the target rate on the national load), hence the calibration per source.
 
     python -m src.recommendations.alarms        # calibrate, run both on all series, write data/alerts/alerts.csv
 """
@@ -81,34 +84,60 @@ def adwin_alarms(r: np.ndarray, start: int, delta: float) -> pd.DataFrame:
 DETECTORS = {"profile_conformal": (conformal_alarms, "mult", MULT_GRID), "adwin": (adwin_alarms, "delta", DELTA_GRID)}
 
 
+def alarms_in(method: str, y: np.ndarray, start: int, value: float) -> pd.DataFrame:
+    """Alarms of one detector on the profile residuals of `y` from position `start` on."""
+    return DETECTORS[method][0](profile_residuals(y), start, value)
+
+
 def alarms_of(method: str, s: dict, value: float) -> pd.DataFrame:
-    fn = DETECTORS[method][0]
-    return fn(profile_residuals(s["y"]), s["t_deploy"], value)
+    return alarms_in(method, s["y"], s["t_deploy"], value)
 
 
-def false_alarm_rate(method: str, controls: list[dict], value: float) -> float:
-    """Alarms per hour on series without changes, from deployment to the end."""
-    hours = sum(len(s["y"]) - s["t_deploy"] for s in controls)
-    return sum(len(alarms_of(method, s, value)) for s in controls) / hours
+def control_windows(series: list[dict], entsoe_path: str | Path | None = None) -> dict[str, list[tuple]]:
+    """Control periods without changes per source, as (y, start, stop): the synthetic control series from
+    deployment to the end, the seismic series from deployment to the first measures, and for ENTSO-E the
+    year 2019 of the same countries (loaded from `entsoe_path`; the test period is 2020)."""
+    out: dict[str, list[tuple]] = {}
+    for s in series:
+        if s["source"] == "synthetic" and s["scenario"] == "none":
+            out.setdefault("synthetic", []).append((s["y"], s["t_deploy"], len(s["y"])))
+        elif s["source"] == "seismic":
+            out.setdefault("seismic", []).append((s["y"], s["t_deploy"], s["t_change"]))
+    if entsoe_path is not None and any(s["source"] == "entsoe" for s in series):
+        from src.recommendations.data_sources import entsoe_series
+
+        for s in entsoe_series(str(entsoe_path), deploy="2019-01-07", end="2019-12-01 23:00"):
+            out.setdefault("entsoe", []).append((s["y"], s["t_deploy"], len(s["y"])))
+    return out
 
 
-def calibrate(method: str, controls: list[dict], target_days: int = TARGET_DAYS) -> tuple[float, float]:
-    """The first grid value (from sensitive to strict) whose false alarm rate on the control series is at most
+def false_alarm_rate(method: str, windows: list[tuple], value: float) -> float:
+    """Alarms per hour inside the control windows (y, start, stop)."""
+    hours = sum(stop - start for _, start, stop in windows)
+    alarms = 0
+    for y, start, stop in windows:
+        idx = alarms_in(method, y, start, value)["index"]
+        alarms += int(((idx >= start) & (idx < stop)).sum())
+    return alarms / hours
+
+
+def calibrate(method: str, windows: list[tuple], target_days: int = TARGET_DAYS) -> tuple[float, float]:
+    """The first grid value (from sensitive to strict) whose false alarm rate on the control windows is at most
     one alarm per `target_days` days; the strictest value if none reaches it. Returns (value, rate)."""
     _, _, grid = DETECTORS[method]
-    rates = [(v, false_alarm_rate(method, controls, v)) for v in grid]
+    rates = [(v, false_alarm_rate(method, windows, v)) for v in grid]
     for v, rate in rates:
         if rate <= 1 / (target_days * DAY):
             return v, rate
     return rates[-1]
 
 
-def detect_all(series: list[dict], params: dict[str, float]) -> pd.DataFrame:
-    """Alarm table of every detector in `params` (method -> calibrated value) on every series."""
+def detect_all(series: list[dict], params: dict[str, dict[str, float]]) -> pd.DataFrame:
+    """Alarm table of every detector on every series; `params` maps source -> method -> calibrated value."""
     rows = []
     for s in series:
         stamps = pd.date_range(s["start"], periods=len(s["y"]), freq="1h")
-        for method, value in params.items():
+        for method, value in params[s["source"]].items():
             a = alarms_of(method, s, value)
             a.insert(0, "timestamp", stamps[a["index"].to_numpy(dtype=int)])
             a.insert(0, "method", method)
@@ -169,14 +198,17 @@ def main():
     t = time.time()
     series = [] if args.no_real else entsoe_series(str(ENTSOE_FILE)) + seismic_series(str(SEISMIC_DIR))
     series += synthetic_series(fit_models(args.clients), list(range(args.seeds)))
-    controls = [s for s in series if s["scenario"] == "none"]
+    windows = control_windows(series, None if args.no_real else ENTSOE_FILE)
     params, rows = {}, []
-    for method, (_, name, _) in DETECTORS.items():
-        value, rate = calibrate(method, controls, args.target_days)
-        params[method] = value
-        rows.append(dict(method=method, param=name, value=value, far_control_per_1000=round(rate * 1000, 3),
-                         target_per_1000=round(1000 / (args.target_days * DAY), 3), control_series=len(controls)))
-        print(f"{method}: {name} = {value}, {rate * 1000:.2f} false alarms per 1000 h on {len(controls)} control series")
+    for source, w in windows.items():
+        params[source] = {}
+        hours = sum(stop - start for _, start, stop in w)
+        for method, (_, name, _) in DETECTORS.items():
+            value, rate = calibrate(method, w, args.target_days)
+            params[source][method] = value
+            rows.append(dict(source=source, method=method, param=name, value=value, far_control_per_1000=round(rate * 1000, 3),
+                             target_per_1000=round(1000 / (args.target_days * DAY), 3), control_windows=len(w), control_hours=hours))
+            print(f"{source} / {method}: {name} = {value}, {rate * 1000:.2f} false alarms per 1000 h on {len(w)} control windows ({hours} h)")
     alerts = detect_all(series, params)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)

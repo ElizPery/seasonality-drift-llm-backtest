@@ -4,8 +4,8 @@ import pandas as pd
 import pytest
 
 from src.data.frames import series_table
-from src.recommendations.alarms import (DETECTORS, adwin_alarms, calibrate, conformal_alarms, detect_all, false_alarm_rate,
-                                        profile_residuals, read_alerts)
+from src.recommendations.alarms import (DETECTORS, adwin_alarms, calibrate, conformal_alarms, control_windows, detect_all,
+                                        false_alarm_rate, profile_residuals, read_alerts)
 from src.recommendations.backtester import ALARM_STRATEGIES, STRATEGIES, backtest, evaluate_series
 from src.recommendations.forecast import BASE_FEATURES, DAY, WEEK
 from tests.test_backtester import N, T_CHANGE, T_DEPLOY, toy
@@ -62,6 +62,17 @@ def test_evaluate_series_runs_an_alarm_strategy_once_per_detector():
     assert "start" not in rows.columns
 
 
+def test_job_runs_every_detector_on_every_series_even_without_alarms():
+    from src.recommendations.backtester import _job
+
+    y, F = toy(shift=30)
+    s = series_dict(y, F)
+    alerts = {"synthetic/toy/s0/level_shift": {"a": np.array([T_CHANGE + 5])}}  # detector "b" has no alarms here
+    rows = pd.DataFrame(_job(s, strategies=(BY_NAME["nothing"], BY_NAME["alarm_retrain"]), alerts=alerts, detectors=("a", "b")))
+    on = rows[rows.strategy == "alarm_retrain"].set_index("detector")
+    assert sorted(on.index) == ["a", "b"] and on.loc["b", "retrains"] == 0 and on.loc["a", "retrains"] == 1
+
+
 def test_profile_conformal_uses_only_the_past_and_fires_after_a_shift():
     y, F = toy(shift=40)
     r = profile_residuals(y)
@@ -86,12 +97,26 @@ def test_adwin_stand_in_fires_after_a_shift():
     assert len(after) > 0 and after.min() - T_CHANGE < 3 * DAY
 
 
-def test_calibration_meets_the_target_false_alarm_rate_on_control_series():
-    controls = [dict(y=toy(seed=k)[0], t_deploy=T_DEPLOY) for k in range(3)]
+def test_calibration_meets_the_target_false_alarm_rate_on_control_windows():
+    controls = [(toy(seed=k)[0], T_DEPLOY, N) for k in range(3)]
     value, rate = calibrate("profile_conformal", controls, target_days=14)
     assert rate == false_alarm_rate("profile_conformal", controls, value)
     assert rate <= 1 / (14 * DAY) or value == DETECTORS["profile_conformal"][2][-1]
     assert false_alarm_rate("profile_conformal", controls, 1.0) >= rate  # a more sensitive setting alarms at least as often
+    # alarms outside the window do not count: the window before the shift of a changed series is clean
+    y, _ = toy(shift=40)
+    before = false_alarm_rate("profile_conformal", [(y, T_DEPLOY, T_CHANGE)], 2.0)
+    whole = false_alarm_rate("profile_conformal", [(y, T_DEPLOY, N)], 2.0)
+    assert before <= whole
+
+
+def test_control_windows_per_source():
+    y, F = toy()
+    series = [series_dict(y, F, scenario="none", magnitude=0.0), series_dict(y, F),
+              series_dict(y, F, source="seismic", series="BE.UCC", scenario="lockdown_2020")]
+    w = control_windows(series)
+    assert sorted(w) == ["seismic", "synthetic"] and len(w["synthetic"]) == 1  # the changed synthetic series is not a control
+    assert w["synthetic"][0][1:] == (T_DEPLOY, N) and w["seismic"][0][1:] == (T_DEPLOY, T_CHANGE)
 
 
 def test_alerts_file_round_trip_and_timestamp_matching(tmp_path):
@@ -99,7 +124,7 @@ def test_alerts_file_round_trip_and_timestamp_matching(tmp_path):
     utc = series_dict(y, F, start="2017-01-02 00:00:00+00:00", source="entsoe", series="IT", scenario="lockdown_2020")
     naive = series_dict(y, F)
     manifest = series_table([utc, naive])
-    alerts = detect_all([utc, naive], {"profile_conformal": 2.0})
+    alerts = detect_all([utc, naive], {"entsoe": {"profile_conformal": 2.0}, "synthetic": {"profile_conformal": 2.0}})
     assert set(alerts.columns) == {"id", "source", "series", "scenario", "method", "timestamp", "index", "score", "threshold"}
     assert alerts["timestamp"].iloc[0] == pd.Timestamp("2017-01-02 00:00:00+00:00") + pd.Timedelta(hours=int(alerts["index"].iloc[0]))
     path = tmp_path / "alerts.csv"

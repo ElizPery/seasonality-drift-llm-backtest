@@ -1,3 +1,7 @@
-method,param,value,far_control_per_1000,target_per_1000,control_series
-profile_conformal,mult,1.2,2.558,2.976,60
-adwin,delta,0.003,2.615,2.976,60
+source,method,param,value,far_control_per_1000,target_per_1000,control_windows,control_hours
+seismic,profile_conformal,mult,1.6,2.3,2.976,15,14784
+seismic,adwin,delta,0.3,1.759,2.976,15,14784
+synthetic,profile_conformal,mult,1.2,2.558,2.976,60,141120
+synthetic,adwin,delta,0.003,2.615,2.976,60,141120
+entsoe,profile_conformal,mult,1.6,1.931,2.976,8,63168
+entsoe,adwin,delta,1e-06,8.295,2.976,8,63168
