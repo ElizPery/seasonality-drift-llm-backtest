@@ -10,6 +10,7 @@
     │
     ├── notebooks/                  # Research Jupyter Notebooks for experiments
     │   ├── 01_eda_and_baselines.ipynb
+    │   ├── 02_residual_conformal_evaluation.ipynb # Stream A: Residual conformal evaluation & visualization
     │   └── 02_stream_b_baselines.ipynb  # Stream B: strategies, oracles, examples
     │
     ├── src/                        # Core service source code
@@ -18,8 +19,10 @@
     │   │   ├── data_loader.py          # Data loading and standardization (Alibaba, UCI, TCPDBench)
     │   │   ├── drift_generator.py      # STL decomposition + 3-level benchmark generation
     │   │   ├── baseline_detectors.py   # KS, PSI, ADWIN, Page-Hinkley, KSWIN (River / SciPy)
+    │   │   ├── residual_detector.py    # STL decomposition + adaptive conformal intervals on residuals
     │   │   ├── generate_benchmarks.py
-    │   │   └── run_baseline_evaluation.py # Baseline metric runner
+    │   │   ├── run_baseline_evaluation.py # Baseline metric runner 
+    │   │   └── run_residual_detector_evaluation.py # Residual conformal evaluation runner
     │   │
     │   ├── recommendations/        # Stream B: LLM diagnostics and backtesting
     │   │   ├── forecast.py         # LightGBM day-ahead model, seasonal naive, MASE
@@ -145,6 +148,17 @@ for f in BE.UCC..HHZ IV.MILN..HHZ IV.FIR..HHZ FR.CURIE.00.HHZ GB.EDI..HHZ NL.ALK
   curl -L -o "data/raw/seismic_noise/$f.csv" "$R/PaperZero_RMS/$f.csv"
 done
 ```
+
+
+## Stream A: Residual Conformal Drift Detection and Evaluation (`src/detector`)
+
+To solve the alert fatigue problem common in seasonal time series (where traditional batch tests like PSI and Wasserstein trigger massive false alarms due to natural seasonality), Stream A implements a **seasonality-aware dual-layer detector**:
+
+- **`residual_detector.py`**: Performs STL decomposition to separate trend, seasonality, and residuals. It computes **adaptive conformal intervals** on the residuals to monitor two independent anomaly dimensions:
+  1. *Absolute residual deviation* (detecting sudden level shifts or mean changes).
+  2. *Local Interquartile Range (IQR) dispersion* (detecting volatility and amplitude shifts).
+- **`run_residual_detector_evaluation.py`**: Executes the evaluation runner across the 3-level benchmark suite (Level 1 clean block-bootstrap series for False Alarm Rate, Level 2 semi-synthetic injected drifts across $0.5\sigma$ to $3\sigma$ magnitudes, and Level 3 real-world consensus datasets).
+- **`notebooks/02_residual_conformal_evaluation.ipynb`**: Interactive research notebook containing comparative visualizations, precision-recall breakdowns, and detection delay curves against traditional streaming and batch baselines (ADWIN, KS, PSI, Page-Hinkley, KSWIN, Wasserstein).
 
 
 ## Stream B: Adaptation Strategies and Backtest (`src/recommendations`)
