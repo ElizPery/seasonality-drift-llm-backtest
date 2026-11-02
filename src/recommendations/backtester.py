@@ -238,7 +238,7 @@ def evaluate_series(s: dict, params: dict | None = None, strategies=STRATEGIES, 
     naive[t_dep:end] = seasonal_naive(y, np.arange(t_dep, end))
     runs["naive"] = dict(pred=naive, retrains=0, picks=[], end=end)
     gated = {st.name for st in strategies if st.policy in ("gated", "advised")}
-    labels = {k: v for k, v in s.items() if k not in ("y", "F", "base_features")}
+    labels = {k: v for k, v in s.items() if k not in ("y", "F", "base_features", "start")}
     rows = []
     for name, r in runs.items():
         row = dict(labels, strategy=name, scale=scale, retrains=r["retrains"],
