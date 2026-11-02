@@ -226,6 +226,20 @@ Strategies `llm` (applied as proposed) and `llm_gate` (applied only if the accep
 `data/llm_answers/` (kept in git), so a rerun reads the stored answers and needs no API key. The key is read from
 `~/.config/diploma/anthropic.env` (one line `ANTHROPIC_API_KEY=...`, another path can be set in `LLM_KEY_FILE`).
 
+Decisions on detector alarms (`alarms.py`, the link with stream A): the strategies `alarm_retrain`, `alarm_gate`,
+`alarm_catalog_gate`, `alarm_oracle`, `alarm_rules`, `alarm_rules_gate`, `alarm_llm` and `alarm_llm_gate` take the
+same decisions as their weekly counterparts, but at the first origin after an alarm of a drift detector, then ignore
+alarms for 7 days (`cooldown_days`). They run once per detector in an alerts file: one row per alarm with `id`
+(`source/series/scenario` as in the manifest of `src/data`), `method` and `timestamp` (or `index`); detector
+alarms are matched to the series by `id` and `timestamp`. Every row of `runs.csv` also reports `alarms` (alarms after
+deployment), `acts_pre` (model changes before the change of the series, all of them on a series without one: the cost
+of false alarms or of a fixed calendar) and `reaction_h` (hours from the change to the first model change after it).
+Until the detectors of stream A deliver their alarms, two stand-in detectors run on the same series, both using only
+the past: `profile_conformal` (the residual of each hour from the median of the same hour of the last 4 weeks, a
+conformal threshold on the last 2 weeks of residuals, two consecutive violations, one-day cooldown) and `adwin`
+(ADWIN on the same residuals). Their sensitivity is calibrated on the 60 control series to one false alarm per 14 days;
+`data/alerts/detectors.csv` records the chosen settings and `data/alerts/alerts.csv` their alarms (kept in git).
+
 Data: 240 synthetic series (20 UCI clients x 3 seeds x {no change, level shift 2 sigma, one-week ramp 2 sigma,
 noise x2}, 24 weeks, deployment at week 10, change at week 13), the national load of 8 countries (dataset 5,
 deployment 6 January 2020) and the seismic noise level at 15 stations (dataset 6, hourly log10 on the local clock,
@@ -238,6 +252,9 @@ python -m src.recommendations.run_backtest --tune            # base model valida
 python -m src.recommendations.run_backtest                   # all sources, about 40 minutes on 16 cores
 python -m src.recommendations.run_backtest --sources seismic # recompute one source, keep the other rows
 python -m src.recommendations.run_backtest --advisors rules  # add the advised strategies (rules, llm) to runs.csv
+python -m src.recommendations.alarms                         # stand-in detectors: calibrate, write data/alerts/alerts.csv
+python -m src.recommendations.run_backtest --alerts data/alerts/alerts.csv --advisors rules
+                                                             # add the strategies that review on alarms, per detector
 python -m pytest tests                                       # tests
 ```
 

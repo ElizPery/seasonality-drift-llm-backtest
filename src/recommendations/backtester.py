@@ -16,6 +16,11 @@ changed and how:
 * oracle         - the same every day with a one-day lookahead: the ideal ceiling (never worse than `always`).
 The oracles use future data, so they cannot be deployed; they only bound what any policy can reach.
 
+The strategies with `trigger="alarm"` (`ALARM_STRATEGIES`) take the same decisions, but at the first origin
+after an alarm of a drift detector instead of on a calendar, then ignore alarms for `cooldown_days`: this is
+the link with stream A, and the cost of false alarms shows up in their retrainings and checks on series
+without a change. They run once per detector whose alarms are given (see `alarms.py`).
+
 Quality is MASE (scale: weekly seasonal naive on the training data), cost is the number of retrainings.
 `mase_gain_ci` gives the gain Delta = MASE before - MASE after with a moving block bootstrap interval over
 days. `check_action` is the acceptance rule of the backtest: an action is applied only if the lower bound
@@ -31,6 +36,7 @@ from multiprocessing import Pool
 import numpy as np
 import pandas as pd
 
+from src.data.frames import series_id
 from src.recommendations.catalog import ACTIONS, CATALOG, apply_action
 from src.recommendations.forecast import DAY, LGBM_PARAMS, WEEK, Model, mase_scale, seasonal_naive
 from src.recommendations.llm_client import diagnostics
@@ -52,6 +58,8 @@ class Strategy:
     action: str | None = None  # gated: the only candidate; None = every catalog action except keep
     advisor: str | None = None  # advised: key of the advisor that proposes one action (see llm_client)
     gate: bool = False  # advised: apply the proposal only if the acceptance rule confirms it
+    trigger: str = "calendar"  # calendar: every `cadence_days`; alarm: at the first origin after a detector alarm
+    cooldown_days: int = 7  # alarm: alarms this soon after a review are ignored
 
 
 STRATEGIES = (
@@ -69,6 +77,18 @@ ADVISED_STRATEGIES = (
     Strategy("rules_gate", "правила на діагностиці з бектестом", 7, "advised", advisor="rules", gate=True),
     Strategy("llm", "LLM без бектесту", 7, "advised", advisor="llm"),
     Strategy("llm_gate", "LLM з діагностикою та бектестом", 7, "advised", advisor="llm", gate=True),
+)
+# strategies that review the model on a detector alarm: run only when alarms are given (`alerts` of `evaluate_series`);
+# `cadence_days` is the lookahead window of the oracle; the advised ones also need their advisor
+ALARM_STRATEGIES = (
+    Strategy("alarm_retrain", "перенавчання за тривогою детектора, без бектесту", 7, "fixed", "retrain_full", trigger="alarm"),
+    Strategy("alarm_gate", "перенавчання за тривогою, лише якщо бектест підтверджує виграш", 7, "gated", "retrain_full", trigger="alarm"),
+    Strategy("alarm_catalog_gate", "за тривогою найкраща дія каталогу з тих, що пройшли бектест", 7, "gated", trigger="alarm"),
+    Strategy("alarm_oracle", "оракул за тривогою: найкраща дія каталогу за фактом на наступному тижні", 7, "oracle", trigger="alarm"),
+    Strategy("alarm_rules", "за тривогою правила на діагностиці, без бектесту", 7, "advised", advisor="rules", trigger="alarm"),
+    Strategy("alarm_rules_gate", "за тривогою правила на діагностиці з бектестом", 7, "advised", advisor="rules", gate=True, trigger="alarm"),
+    Strategy("alarm_llm", "за тривогою LLM без бектесту", 7, "advised", advisor="llm", trigger="alarm"),
+    Strategy("alarm_llm_gate", "за тривогою LLM з діагностикою та бектестом", 7, "advised", advisor="llm", gate=True, trigger="alarm"),
 )
 
 
@@ -121,7 +141,7 @@ def check_action(a, model: Model, y: np.ndarray, F: dict[str, np.ndarray], pred:
 
 def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: Strategy, base_features: tuple[str, ...],
              params: dict | None = None, catalog=CATALOG, cache: dict | None = None, prune_cache: bool = False,
-             advisors: dict | None = None, repeat: int = 0) -> dict:
+             advisors: dict | None = None, repeat: int = 0, alarms=None, detector: str | None = None) -> dict:
     """Rolling day-ahead forecasts from `t_deploy` to the end of the series under one strategy.
 
     Retraining fits are shared through `cache` between strategies of the same series (see `make_actor`).
@@ -129,24 +149,44 @@ def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: S
     moves on, which bounds memory. Gated and advised strategies decide only once they have `VAL_WEEKS`
     weeks of their own forecasts to check against. `advisors` maps advisor keys to objects with
     `recommend(context, repeat)`; `repeat` numbers repeated runs of a non-deterministic advisor.
-    Counters: `decisions` (review points), `proposed` (proposals of a change), `accepted` (changes applied)."""
+    `alarms` are the positions of the alarms of the detector `detector` on this series: a strategy with
+    `trigger="alarm"` reviews the model at the first origin after an alarm (alarms before the origin are
+    known, the origin itself is not), then ignores alarms for `cooldown_days`; alarms before deployment are
+    ignored. Counters: `decisions` (review points), `proposed` (proposals of a change), `accepted` (changes
+    applied), `applied` (origins at which the model was changed), `alarms` (alarms after deployment)."""
     n = len(y)
     origins = list(range(t_deploy, n - DAY + 1, DAY))
     end = origins[-1] + DAY
     cache = {} if cache is None else cache
     act = make_actor(F, y, base_features, params, cache)
     scale = mase_scale(y[:t_deploy])
+    alarms = np.sort(np.asarray([] if alarms is None else alarms, dtype=int))
 
     model, _ = act(ACTIONS["retrain_full"], Model(base_features), t_deploy)
     pred = np.full(n, np.nan)
-    retrains, picks = 0, []
+    retrains, picks, applied = 0, [], []
     decisions = proposed = accepted = check_fits = 0
     last_change = t_deploy
+    seen = int(np.searchsorted(alarms, t_deploy))  # alarms consumed or ignored so far
+    last_review = t_deploy - strategy.cooldown_days * DAY
     for k, T in enumerate(origins):
-        if strategy.cadence_days and k > 0 and k % strategy.cadence_days == 0:
+        alarm = None
+        if strategy.trigger == "alarm":
+            known = int(np.searchsorted(alarms, T))  # alarms before this origin
+            if T - last_review < strategy.cooldown_days * DAY:
+                seen = known
+            due = known > seen
+            if due:
+                alarm = dict(method=detector, hours_ago=int(T - alarms[known - 1]))
+                seen, last_review = known, T
+        else:
+            due = bool(strategy.cadence_days) and k > 0 and k % strategy.cadence_days == 0
+        if due:
+            changed = False
             if strategy.policy == "fixed":
                 model, fits = act(ACTIONS[strategy.action], model, T)
                 retrains += fits
+                changed = True
             elif strategy.policy == "gated":
                 if T - VAL_WEEKS * WEEK >= t_deploy:
                     cands = [ACTIONS[strategy.action]] if strategy.action else [a for a in catalog if a.kind != "none"]
@@ -160,10 +200,11 @@ def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: S
                         model, fits = act(ACTIONS[best], model, T)
                         retrains += fits
                         accepted += 1
+                        changed = True
                     picks.append(best if ok else "keep")
             elif strategy.policy == "advised":
                 if T - VAL_WEEKS * WEEK >= t_deploy:
-                    ctx = diagnostics(y, pred, T, t_deploy, scale, last_change)
+                    ctx = diagnostics(y, pred, T, t_deploy, scale, last_change, alarm=alarm)
                     a = ACTIONS[advisors[strategy.advisor].recommend(ctx, repeat).action]
                     decisions += 1
                     ok = a.kind != "none"
@@ -178,6 +219,7 @@ def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: S
                         retrains += fits
                         accepted += 1
                         last_change = T
+                        changed = True
                     picks.append(a.name if ok else "keep")
             else:  # hindsight oracle: best action on the next decision window
                 rows = np.arange(T, min(T + strategy.cadence_days * DAY, end))
@@ -190,13 +232,17 @@ def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: S
                 _, name, model, fits = best
                 retrains += fits
                 picks.append(name)
+                changed = name != "keep"
+            if changed:
+                applied.append(T)
         rows = np.arange(T, T + DAY)
         pred[rows] = model.predict(F, rows)
         if prune_cache:
             for key in [key for key in cache if key[1] <= T - VAL_WEEKS * WEEK]:
                 del cache[key]
     return dict(pred=pred, retrains=retrains, picks=picks, end=end, decisions=decisions, proposed=proposed,
-                accepted=accepted, check_fits=check_fits)
+                accepted=accepted, check_fits=check_fits, applied=applied,
+                alarms=int(((alarms >= t_deploy) & (alarms < end)).sum()))
 
 
 def mase(y: np.ndarray, pred: np.ndarray, start: int, stop: int, scale: float) -> float:
@@ -224,32 +270,43 @@ def mase_gain_ci(y: np.ndarray, pred_before: np.ndarray, pred_after: np.ndarray,
 
 
 def evaluate_series(s: dict, params: dict | None = None, strategies=STRATEGIES, advisors: dict | None = None,
-                    repeat: int = 0) -> list[dict]:
-    """All strategies on one series. `s` holds y, F, t_deploy, t_change, base_features and labels."""
+                    repeat: int = 0, alerts: dict | None = None) -> list[dict]:
+    """All strategies on one series. `s` holds y, F, t_deploy, t_change, base_features and labels. `alerts`
+    maps a detector name to its alarm positions on this series; a strategy with `trigger="alarm"` runs once
+    per detector (column `detector`) and is skipped without alerts. Besides MASE and retrainings, every row
+    gets `acts_pre` (model changes before the change of the series, all of them on a series without one:
+    the cost of false alarms or of a fixed calendar) and `reaction_h` (hours from the change to the first
+    model change after it)."""
     y, F, t_dep, t_chg = s["y"], s["F"], s["t_deploy"], s["t_change"]
     scale = mase_scale(y[:t_dep])
     cache: dict = {}
-    runs = {st.name: backtest(y, F, t_dep, st, s["base_features"], params, cache=cache, prune_cache=(i == len(strategies) - 1),
-                              advisors=advisors, repeat=repeat)
-            for i, st in enumerate(strategies)}
+    jobs = [(st, d) for st in strategies for d in ([None] if st.trigger == "calendar" else sorted(alerts or {}))]
+    runs = {}
+    for i, (st, d) in enumerate(jobs):
+        runs[(st.name, d)] = backtest(y, F, t_dep, st, s["base_features"], params, cache=cache, prune_cache=(i == len(jobs) - 1),
+                                      advisors=advisors, repeat=repeat, alarms=None if d is None else alerts[d], detector=d)
     cache.clear()
-    end = runs["nothing"]["end"]
+    end = runs[("nothing", None)]["end"]
     naive = np.full(len(y), np.nan)
     naive[t_dep:end] = seasonal_naive(y, np.arange(t_dep, end))
-    runs["naive"] = dict(pred=naive, retrains=0, picks=[], end=end)
+    runs[("naive", None)] = dict(pred=naive, retrains=0, picks=[], end=end)
     gated = {st.name for st in strategies if st.policy in ("gated", "advised")}
     labels = {k: v for k, v in s.items() if k not in ("y", "F", "base_features", "start")}
     rows = []
-    for name, r in runs.items():
-        row = dict(labels, strategy=name, scale=scale, retrains=r["retrains"],
+    for (name, d), r in runs.items():
+        applied = r.get("applied", [])
+        row = dict(labels, strategy=name, detector=d, scale=scale, retrains=r["retrains"],
                    mase_all=mase(y, r["pred"], t_dep, end, scale),
                    mase_pre=mase(y, r["pred"], t_dep, t_chg, scale) if t_chg and t_chg > t_dep else np.nan,
                    mase_post=mase(y, r["pred"], t_chg, end, scale) if t_chg else np.nan,
                    picks=" ".join(f"{a}:{c}" for a, c in Counter(r["picks"]).most_common()),
-                   **{k: r[k] if name in gated else np.nan for k in ("decisions", "proposed", "accepted", "check_fits")})
+                   **{k: r[k] if name in gated else np.nan for k in ("decisions", "proposed", "accepted", "check_fits")},
+                   alarms=r.get("alarms", np.nan) if d is not None else np.nan,
+                   acts_pre=sum(1 for T in applied if not t_chg or T < t_chg) if name != "naive" else np.nan,
+                   reaction_h=next((T - t_chg for T in applied if T >= t_chg), np.nan) if t_chg else np.nan)
         if name != "nothing":
             a = t_chg if t_chg else t_dep
-            g, lo, hi = mase_gain_ci(y, runs["nothing"]["pred"], r["pred"], a, end, scale)
+            g, lo, hi = mase_gain_ci(y, runs[("nothing", None)]["pred"], r["pred"], a, end, scale)
             row.update(gain_vs_nothing=g, gain_lo=lo, gain_hi=hi)
         rows.append(row)
     return rows
@@ -258,25 +315,28 @@ def evaluate_series(s: dict, params: dict | None = None, strategies=STRATEGIES, 
 _WORKER: dict = {}  # advisors of a worker process, created on its first series
 
 
-def _job(s, strategies=STRATEGIES, advisors: tuple[str, ...] = (), llm_model: str | None = None):
+def _job(s, strategies=STRATEGIES, advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None):
     if advisors and "advisors" not in _WORKER:
         from src.recommendations.llm_client import DEFAULT_MODEL, LLMAdvisor, RuleAdvisor
 
         made = {"rules": RuleAdvisor, "llm": lambda: LLMAdvisor(llm_model or DEFAULT_MODEL)}
         _WORKER["advisors"] = {k: made[k]() for k in advisors}
-    return evaluate_series(s, LGBM_PARAMS, strategies, _WORKER.get("advisors"))
+    return evaluate_series(s, LGBM_PARAMS, strategies, _WORKER.get("advisors"), alerts=(alerts or {}).get(series_id(s)))
 
 
 def sort_runs(df: pd.DataFrame) -> pd.DataFrame:
-    order = ["naive"] + [s.name for s in STRATEGIES + ADVISED_STRATEGIES]
-    df = df.assign(_o=df.strategy.map(order.index))
-    return df.sort_values(["source", "scenario", "series", "_o"]).drop(columns="_o").reset_index(drop=True)
+    order = ["naive"] + [s.name for s in STRATEGIES + ADVISED_STRATEGIES + ALARM_STRATEGIES]
+    if "detector" not in df:
+        df = df.assign(detector=np.nan)
+    df = df.assign(_o=df.strategy.map(order.index), _d=df.detector.fillna(""))
+    return df.sort_values(["source", "scenario", "series", "_o", "_d"]).drop(columns=["_o", "_d"]).reset_index(drop=True)
 
 
 def run_backtests(series: list[dict], processes: int | None = None, log=None, strategies=STRATEGIES,
-                  advisors: tuple[str, ...] = (), llm_model: str | None = None) -> pd.DataFrame:
+                  advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None) -> pd.DataFrame:
+    """`alerts`: alarm positions per series id and detector (see `alarms.read_alerts`) for the alarm strategies."""
     rows = []
-    job = partial(_job, strategies=strategies, advisors=advisors, llm_model=llm_model)
+    job = partial(_job, strategies=strategies, advisors=advisors, llm_model=llm_model, alerts=alerts)
     with Pool(processes) as pool:
         for i, rs in enumerate(pool.imap_unordered(job, series, chunksize=1), 1):
             rows.extend(rs)
@@ -312,15 +372,16 @@ def summarize(runs: pd.DataFrame) -> pd.DataFrame:
     r = runs.join(oracle.rename("oracle_post"), on=["source", "series", "scenario"])
     r["regret"] = r.mase_post - r.oracle_post
     r["gain_significant"] = (r.gain_lo > 0).astype(float).where(r.gain_lo.notna())
-    for c in ("decisions", "proposed", "accepted", "check_fits"):  # absent in results computed before the acceptance rule
-        if c not in r:
+    for c in ("decisions", "proposed", "accepted", "check_fits", "detector", "alarms", "acts_pre", "reaction_h"):
+        if c not in r:  # absent in results computed before the acceptance rule or the alarm strategies
             r[c] = np.nan
     r["accept_rate"] = r.accepted / r.proposed.fillna(r.decisions).where(lambda x: x > 0)  # share of proposals applied
-    g = r.groupby(["source", "scenario", "strategy"], sort=False).agg(
+    g = r.groupby(["source", "scenario", "strategy", r.detector.fillna("")], sort=False).agg(
         series=("series", "nunique"), mase_pre=("mase_pre", "mean"), mase_post=("mase_post", "mean"),
         regret=("regret", "mean"), retrains=("retrains", "mean"), gain_vs_nothing=("gain_vs_nothing", "mean"),
         share_gain_significant=("gain_significant", "mean"), accept_rate=("accept_rate", "mean"),
-        check_fits=("check_fits", "mean")).reset_index()
+        check_fits=("check_fits", "mean"), alarms=("alarms", "mean"), acts_pre=("acts_pre", "mean"),
+        reaction_h=("reaction_h", "mean")).reset_index()
     return g
 
 

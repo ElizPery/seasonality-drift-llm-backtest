@@ -21,7 +21,10 @@ LABEL = {"naive": "seasonal naive", "nothing": "do nothing", "always": "always r
          "scheduled": "scheduled (weekly)", "scheduled_gate": "scheduled + backtest check",
          "catalog_gate": "best checked action (weekly)", "rules": "rules, no check", "rules_gate": "rules + backtest check",
          "llm": "LLM, no check", "llm_gate": "LLM + backtest check", "oracle_weekly": "oracle, weekly",
-         "oracle": "oracle, daily (ideal)"}
+         "oracle": "oracle, daily (ideal)", "alarm_retrain": "retrain on alarm", "alarm_gate": "alarm + backtest check",
+         "alarm_catalog_gate": "best checked action on alarm", "alarm_oracle": "oracle on alarm",
+         "alarm_rules": "rules on alarm, no check", "alarm_rules_gate": "rules on alarm + check",
+         "alarm_llm": "LLM on alarm, no check", "alarm_llm_gate": "LLM on alarm + check"}
 PANEL = {("synthetic", "none"): "Synthetic: no change", ("synthetic", "level_shift"): "Synthetic: level shift 2 sigma",
          ("synthetic", "trend_ramp"): "Synthetic: 1-week ramp 2 sigma", ("synthetic", "variance"): "Synthetic: noise x2",
          ("entsoe", "lockdown_2020"): "ENTSO-E, 8 countries: March 2020",
