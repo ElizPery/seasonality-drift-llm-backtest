@@ -165,7 +165,7 @@ def generate_all_benchmarks(data_dir: str = "data"):
     for tcpd_name in tcpd_targets:
         try:
             tcpd_df, ground_truth_cps = loader.load_tcpd_annotated_series(tcpd_name, annotator_key="10")
-            period = "Not defined"  # Estimated domain periodicity or configured default
+            period = 12  # Estimated domain periodicity or configured default
 
             level3_filename = f"level3_tcpd_{tcpd_name}.csv"
             level3_path = processed_dir / level3_filename
