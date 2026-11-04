@@ -86,19 +86,12 @@ def make_control(model: SeasonalModel, n: int, seed: int, block_len: int = DAY) 
 
 @dataclass
 class Change:
-    kind: str  # level_shift | trend_ramp | variance | seasonal_amplitude
+    kind: str  # level_shift | trend_ramp | variance
     magnitude: float  # in units of residual sigma (variance: multiplier of sigma)
     t0: int  # index of the first changed point
 
 
-KINDS = ("level_shift", "trend_ramp", "variance", "seasonal_amplitude")
-
-
 def inject(x: np.ndarray, model: SeasonalModel, change: Change, ramp_len: int = WEEK, seed: int = 0) -> np.ndarray:
-    """One change of known type, moment and magnitude: a level shift of `magnitude` sigma, a ramp to that
-    level over `ramp_len` hours, residual noise with `magnitude` times its sigma (extra bootstrapped residuals),
-    or a larger weekly seasonal profile (the added part of the profile has standard deviation `magnitude` sigma,
-    so the magnitude scale is the same as for the other types)."""
     y = x.copy()
     t = np.arange(len(y))
     after = t >= change.t0
@@ -112,8 +105,6 @@ def inject(x: np.ndarray, model: SeasonalModel, change: Change, ramp_len: int = 
         rng = np.random.default_rng(seed + 10_000)
         extra = block_bootstrap(model.resid, int(after.sum()), rng, start_day=change.t0 // DAY)
         y[after] += extra * np.sqrt(max(change.magnitude**2 - 1.0, 0.0))
-    elif change.kind == "seasonal_amplitude":
-        y[after] += model.profile[t[after] % WEEK] * (delta / model.profile.std())
     else:
         raise ValueError(change.kind)
     return y

@@ -19,8 +19,7 @@
     │   │   ├── uci.py, entsoe.py, seismic_noise.py, alibaba.py, tcpd.py, iquique.py   # one loader per source
     │   │   ├── frames.py           # standard frame (timestamp, value), series_table, write_series
     │   │   ├── loader.py           # DataLoader class interface used by stream A
-    │   │   ├── export.py           # python -m src.data.export: the stream B series as CSV + manifest.csv
-    │   │   └── benchmark.py        # python -m src.data.benchmark: the common 3-level benchmark + benchmark_manifest.json
+    │   │   └── export.py           # python -m src.data.export: the stream B series as CSV + manifest.csv
     │   ├── detector/               # Stream A: Drift detectors and decomposition
     │   │   ├── data_loader.py          # Kept import path of DataLoader (the loaders live in src/data)
     │   │   ├── drift_generator.py      # STL decomposition + 3-level benchmark generation
@@ -176,25 +175,6 @@ python -m src.data.export            # data/processed/series/: one CSV per serie
 `series`, `scenario`, `client`, `seed`, `magnitude`), the length `n`, `start`, and the deployment and
 change points both as positions (`t_deploy`, `t_change`, `t_stop`) and as timestamps (`deploy_at`,
 `change_at`). Detector alarms on these series are matched to the backtest by `id` and `timestamp`.
-
-The common benchmark of both streams extends the same series with the full grid of injected changes and writes
-them with the manifest the stream A scripts read:
-
-```bash
-python -m src.data.benchmark                 # data/processed/benchmark/: 923 series + benchmark_manifest.json + manifest.csv
-python -m src.data.benchmark --magnitudes 2 --kinds level_shift,trend_ramp,variance   # the 263 series of the stream B backtests
-```
-
-Levels: 1 = 60 synthetic control series without changes (20 UCI clients x 3 seeds); 2 = the control series with one
-injected change at week 13 of a known type (abrupt level shift, one-week ramp, noise x2 and x3, larger seasonal
-amplitude) and magnitude (0.5, 1, 2, 3 residual sigmas; 840 series); 3 = the 23 real series with the dated
-measures of March 2020. `benchmark_manifest.json` has the entries of `generate_benchmarks.py` (`dataset_name`,
-`level`, `filename`, `drift_type` abrupt/gradual/variance/seasonal_amplitude/none, `magnitude_sigma`,
-`change_point_idx`, `change_point_indices` for level 3, `seasonality_period` 24 with `seasonality_periods` [24, 168])
-plus `id`, `deploy_idx` and `seed`, so `run_baseline_evaluation` and `run_residual_detector_evaluation` run on it
-unchanged. The control series come from `src/recommendations/synthetic.py` (MSTL with periods 24 and 168, the weekly
-profile averaged, the trend replaced by a constant level, residuals cleaned and resampled with a seasonal block
-bootstrap, so there is no change by construction); the changes are injected into these control series.
 
 ## Stream A: Residual Conformal Drift Detection and Evaluation (`src/detector`)
 
