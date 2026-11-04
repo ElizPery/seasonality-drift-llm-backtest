@@ -22,7 +22,7 @@
     │   │   └── export.py           # python -m src.data.export: the stream B series as CSV + manifest.csv
     │   ├── detector/               # Stream A: Drift detectors and decomposition
     │   │   ├── data_loader.py          # Kept import path of DataLoader (the loaders live in src/data)
-    │   │   ├── drift_generator.py      # STL decomposition + 3-level benchmark generation
+    │   │   ├── drift_generator.py      # Control series (STL/MSTL profile + block bootstrap) + injected changes
     │   │   ├── baseline_detectors.py   # KS, PSI, ADWIN, Page-Hinkley, KSWIN (River / SciPy)
     │   │   ├── residual_detector.py    # STL decomposition + adaptive conformal intervals on residuals
     │   │   ├── generate_benchmarks.py
@@ -183,6 +183,7 @@ To solve the alert fatigue problem common in seasonal time series (where traditi
 - **`residual_detector.py`**: Performs STL decomposition to separate trend, seasonality, and residuals. It computes **adaptive conformal intervals** on the residuals to monitor two independent anomaly dimensions:
   1. *Absolute residual deviation* (detecting sudden level shifts or mean changes).
   2. *Local Interquartile Range (IQR) dispersion* (detecting volatility and amplitude shifts).
+- **`drift_generator.py`, `generate_benchmarks.py`**: Level 1 control series keep a stable seasonal profile (daily and weekly for hourly data, MSTL), a constant level instead of the trend, and residuals cleaned of outliers and resampled with a seasonal block bootstrap with a seed, so they have no changes by construction. Level 2 injects one change of a known type (abrupt, gradual over one cycle, seasonal amplitude, variance), moment and magnitude (0.5 to 3 residual sigmas) into these control series. UCI Electricity gives 20 clients x 3 seeds of 24 weeks (60 control series, 840 with a change at week 13); `python -m src.detector.generate_benchmarks` writes them to `data/processed/` with `benchmark_manifest.json`.
 - **`run_residual_detector_evaluation.py`**: Executes the evaluation runner across the 3-level benchmark suite (Level 1 clean block-bootstrap series for False Alarm Rate, Level 2 semi-synthetic injected drifts across $0.5\sigma$ to $3\sigma$ magnitudes, and Level 3 real-world consensus datasets).
 - **`notebooks/02_residual_conformal_evaluation.ipynb`**: Interactive research notebook containing comparative visualizations, precision-recall breakdowns, and detection delay curves against traditional streaming and batch baselines (ADWIN, KS, PSI, Page-Hinkley, KSWIN, Wasserstein).
 
