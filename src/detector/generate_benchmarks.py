@@ -3,9 +3,13 @@ Benchmark Generation Script for Seasonality-Aware Drift Detection System.
 
 Supports a 3-Level Benchmark Architecture:
 
-- Level 1: Drift-free clean baselines (Alibaba, UCI Electricity, TCPD, SeisBench) for FAR evaluation.
-- Level 2: Controlled Semi-Synthetic Drift Injections (Alibaba & UCI Electricity)
+- Level 1: Drift-free control series (Alibaba, UCI Electricity, TCPD, SeisBench) for FAR evaluation.
+- Level 2: Controlled semi-synthetic drift injections into the Level 1 control series (Alibaba & UCI Electricity)
 - Level 3: Real-world TCPD and SeisBench benchmarks with consensus ground-truth annotations
+
+UCI Electricity: 20 clients x 3 seeds of hourly control series with a daily and a weekly profile (24 weeks each),
+built from 12 weeks of autumn 2013 of every client (no public holidays), and the same series with one injected
+change at week 13. The stream B backtests deploy their model at week 10 (`deploy_idx`) and use these series.
 """
 
 import json
@@ -14,8 +18,64 @@ from typing import Dict, Any, List
 
 import pandas as pd
 
+from src.data.frames import frame_from_series
+from src.data.uci import WEEK, load_hourly, select_clients, source_series
 from src.detector.data_loader import DataLoader
 from src.detector.drift_generator import DriftGenerator
+
+# Target parameters for Level 2 semi-synthetic drift injection
+DRIFT_TYPES = ["abrupt", "gradual", "seasonal_amplitude", "variance"]
+MAGNITUDES = [0.5, 1.0, 2.0, 3.0]  # Magnitudes in sigma standard deviations
+VARIANCE_MAGNITUDES = [2.0, 3.0]  # 'variance': residual noise x2 and x3
+
+# UCI Electricity control series
+UCI_CLIENTS = 20  # first clients active before 2013 with almost no zero readings in 2013 (`select_clients`)
+UCI_SEEDS = (0, 1, 2)  # control series per client
+UCI_WEEKS, UCI_DEPLOY_WEEK, UCI_CHANGE_WEEK = 24, 10, 13
+# Seeds of the control series and of the extra noise of 'variance': with these offsets the series are the ones
+# the stream B backtests have used since October, so their results stay valid
+CONTROL_SEED, VARIANCE_SEED = 500, 10_000
+
+
+def drift_grid() -> List[tuple]:
+    """(drift_type, magnitude) pairs of Level 2."""
+    return [(d, m) for d in DRIFT_TYPES for m in (VARIANCE_MAGNITUDES if d == "variance" else MAGNITUDES)]
+
+
+def generate_uci_benchmarks(processed_dir: Path) -> List[Dict[str, Any]]:
+    """Levels 1 & 2 on UCI Electricity: control series of many clients and seeds, changes injected into them."""
+    hourly = load_hourly()
+    n, deploy_idx, change_idx = UCI_WEEKS * WEEK, UCI_DEPLOY_WEEK * WEEK, UCI_CHANGE_WEEK * WEEK
+    catalog: List[Dict[str, Any]] = []
+
+    for client in select_clients(hourly, UCI_CLIENTS):
+        generator = DriftGenerator(
+            frame_from_series(source_series(hourly, client)), seasonality_period=24, periods=(24, WEEK)
+        )
+        for seed in UCI_SEEDS:
+            series = f"uci_electricity_{client}_s{seed}"
+            common = {"dataset_name": "uci_electricity", "series": series, "client": client, "seed": seed,
+                      "deploy_idx": deploy_idx, "seasonality_period": 24, "seasonality_periods": [24, WEEK]}
+
+            level1_df = generator.generate_level1_baseline(n=n, seed=CONTROL_SEED + seed)
+            level1_filename = f"level1_clean_{series}.csv"
+            level1_df.to_csv(processed_dir / level1_filename, index=False)
+            catalog.append({**common, "level": 1, "filename": level1_filename, "drift_type": "none",
+                            "magnitude_sigma": 0.0, "change_point_idx": None})
+
+            for d_type, mag in drift_grid():
+                injected_df, drift_meta = generator.inject_level2_drift(
+                    drift_type=d_type, change_point_idx=change_idx, magnitude_sigma=mag,
+                    base=level1_df, seed=VARIANCE_SEED + seed,
+                )
+                level2_filename = f"level2_{series}_{d_type}_mag{mag}sig.csv"
+                injected_df.to_csv(processed_dir / level2_filename, index=False)
+                catalog.append({**common, "level": 2, "filename": level2_filename, "drift_type": d_type,
+                                "magnitude_sigma": mag, "change_point_idx": drift_meta["change_point_idx"],
+                                "change_point_timestamp": str(drift_meta["change_point_timestamp"]),
+                                "absolute_delta": drift_meta["absolute_delta"]})
+        print(f"  [Levels 1 & 2] {client}: {len(UCI_SEEDS)} control series + {len(drift_grid())} changes each")
+    return catalog
 
 
 def generate_all_benchmarks(data_dir: str = "data"):
@@ -30,26 +90,17 @@ def generate_all_benchmarks(data_dir: str = "data"):
 
     print("=== Starting 3-Level Benchmark Generation ===")
 
-    # Target parameters for Level 2 semi-synthetic drift injection
-    drift_types = ["abrupt", "gradual", "seasonal_amplitude"]
-    magnitudes = [0.5, 1.0, 2.0, 3.0]  # Magnitudes in sigma standard deviations
-
     metadata_catalog: List[Dict[str, Any]] = []
 
     # -------------------------------------------------------------------------
-    # Levels 1 & 2: Alibaba Cluster Trace & UCI Electricity (Synthetic Framework)
+    # Levels 1 & 2: Alibaba Cluster Trace (Synthetic Framework)
     # -------------------------------------------------------------------------
     # Map target dataset names to their loader methods and seasonality periods
     synthetic_datasets = [
         {
             "name": "alibaba_cluster_trace",
-            "seasonality_period": 288,  # 5-min intervals over 24h (288 steps per day)
+            "seasonality_period": 288,  # 5-min intervals over 24h (288 steps per day); 8 days, so no weekly cycle
             "loader_func": lambda: loader.load_alibaba_standard_trace(metric="cpu_util"),
-        },
-        {
-            "name": "uci_electricity_MT200",
-            "seasonality_period": 24,   # Hourly frequency (24 steps per day)
-            "loader_func": lambda: loader.load_uci_electricity(client_id="MT_200", resample_freq="1h"),
         },
     ]
 
@@ -65,7 +116,7 @@ def generate_all_benchmarks(data_dir: str = "data"):
             print(f"  [Skipped] {err}")
             continue
 
-        generator = DriftGenerator(raw_df, seasonality_period=period)
+        generator = DriftGenerator(raw_df, seasonality_period=period, seed=0)
 
         # Level 1: Generate Drift-Free Baseline Series (FAR Evaluation)
         level1_df = generator.generate_level1_baseline()
@@ -84,33 +135,42 @@ def generate_all_benchmarks(data_dir: str = "data"):
         })
         print(f"  [Level 1] Saved drift-free series -> {level1_filename}")
 
-        # Level 2: Controlled Semi-Synthetic Drift Injections
-        change_idx = len(raw_df) // 2  # Change point placed at 50% length
+        # Level 2: Controlled Semi-Synthetic Drift Injections into the Level 1 control series
+        change_idx = len(level1_df) // 2  # Change point placed at 50% length
 
-        for d_type in drift_types:
-            for mag in magnitudes:
-                injected_df, drift_meta = generator.inject_level2_drift(
-                    drift_type=d_type,
-                    change_point_idx=change_idx,
-                    magnitude_sigma=mag
-                )
+        for d_type, mag in drift_grid():
+            injected_df, drift_meta = generator.inject_level2_drift(
+                drift_type=d_type,
+                change_point_idx=change_idx,
+                magnitude_sigma=mag,
+                base=level1_df,
+            )
 
-                level2_filename = f"level2_{ds_name}_{d_type}_mag{mag}sig.csv"
-                level2_path = processed_dir / level2_filename
-                injected_df.to_csv(level2_path, index=False)
+            level2_filename = f"level2_{ds_name}_{d_type}_mag{mag}sig.csv"
+            level2_path = processed_dir / level2_filename
+            injected_df.to_csv(level2_path, index=False)
 
-                metadata_catalog.append({
-                    "dataset_name": ds_name,
-                    "level": 2,
-                    "filename": level2_filename,
-                    "drift_type": d_type,
-                    "magnitude_sigma": mag,
-                    "change_point_idx": drift_meta["change_point_idx"],
-                    "change_point_timestamp": str(drift_meta["change_point_timestamp"]),
-                    "absolute_delta": drift_meta["absolute_delta"],
-                    "seasonality_period": period
-                })
-                print(f"  [Level 2] Saved {d_type} drift ({mag}σ) -> {level2_filename}")
+            metadata_catalog.append({
+                "dataset_name": ds_name,
+                "level": 2,
+                "filename": level2_filename,
+                "drift_type": d_type,
+                "magnitude_sigma": mag,
+                "change_point_idx": drift_meta["change_point_idx"],
+                "change_point_timestamp": str(drift_meta["change_point_timestamp"]),
+                "absolute_delta": drift_meta["absolute_delta"],
+                "seasonality_period": period
+            })
+            print(f"  [Level 2] Saved {d_type} drift ({mag}σ) -> {level2_filename}")
+
+    # -------------------------------------------------------------------------
+    # Levels 1 & 2: UCI Electricity, many clients and seeds
+    # -------------------------------------------------------------------------
+    print("\n[Levels 1 & 2] Processing dataset: 'uci_electricity'...")
+    try:
+        metadata_catalog.extend(generate_uci_benchmarks(processed_dir))
+    except FileNotFoundError as err:
+        print(f"  [Skipped] {err}")
 
     # -------------------------------------------------------------------------
     # Level 1 ONLY: TCPD & SeisBench Clean Baselines (For FAR Evaluation)
@@ -135,7 +195,7 @@ def generate_all_benchmarks(data_dir: str = "data"):
         print(f"\n[Level 1 Only] Processing clean baseline for: '{ds_name}'...")
         try:
             raw_df = ds_info["loader_func"]()
-            generator = DriftGenerator(raw_df, seasonality_period=period)
+            generator = DriftGenerator(raw_df, seasonality_period=period, seed=0)
             
             level1_df = generator.generate_level1_baseline()
             level1_filename = f"level1_clean_{ds_name}.csv"
