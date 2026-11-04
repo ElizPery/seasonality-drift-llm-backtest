@@ -21,7 +21,10 @@ LABEL = {"naive": "seasonal naive", "nothing": "do nothing", "always": "always r
          "scheduled": "scheduled (weekly)", "scheduled_gate": "scheduled + backtest check",
          "catalog_gate": "best checked action (weekly)", "rules": "rules, no check", "rules_gate": "rules + backtest check",
          "llm": "LLM, no check", "llm_gate": "LLM + backtest check", "oracle_weekly": "oracle, weekly",
-         "oracle": "oracle, daily (ideal)"}
+         "oracle": "oracle, daily (ideal)", "alarm_retrain": "retrain on alarm", "alarm_gate": "alarm + backtest check",
+         "alarm_catalog_gate": "best checked action on alarm", "alarm_oracle": "oracle on alarm",
+         "alarm_rules": "rules on alarm, no check", "alarm_rules_gate": "rules on alarm + check",
+         "alarm_llm": "LLM on alarm, no check", "alarm_llm_gate": "LLM on alarm + check"}
 PANEL = {("synthetic", "none"): "Synthetic: no change", ("synthetic", "level_shift"): "Synthetic: level shift 2 sigma",
          ("synthetic", "trend_ramp"): "Synthetic: 1-week ramp 2 sigma", ("synthetic", "variance"): "Synthetic: noise x2",
          ("entsoe", "lockdown_2020"): "ENTSO-E, 8 countries: March 2020",
@@ -54,6 +57,21 @@ def _place_labels(ax, points):
             ax.annotate(text, (x, y), xytext=(6, 0), textcoords="offset points", va="center", fontsize=7.5, color=color)
 
 
+def label_of(name: str) -> str:
+    """Label of a strategy; a name tagged with its detector, `strategy [detector]`, keeps the detector in brackets."""
+    base, _, det = name.partition(" [")
+    text = LABEL.get(base, base)
+    return f"{text} ({det.rstrip(']')})" if det else text
+
+
+def tag_detector(summary: pd.DataFrame) -> pd.DataFrame:
+    """Strategy names tagged with their detector (`alarm_gate [adwin]`), so rows of one scenario stay unique."""
+    df = summary.copy()
+    has = df.detector.notna() & (df.detector.astype(str) != "")
+    df.loc[has, "strategy"] = df.strategy[has] + " [" + df.detector[has].astype(str) + "]"
+    return df
+
+
 def plot_quality_cost(summary: pd.DataFrame, ncols: int = 3):
     """One panel per scenario: mean retrainings per series against mean MASE after the change."""
     with plt.rc_context(STYLE):
@@ -71,9 +89,9 @@ def _quality_cost(summary: pd.DataFrame, ncols: int):
         d = summary[(summary.source == key[0]) & (summary.scenario == key[1])].set_index("strategy")
         pts = []
         for name, r in d.iterrows():
-            hollow = name.startswith("oracle")
+            hollow = "oracle" in name
             ax.plot(r.retrains, r.mase_post, "o", ms=7, mfc="white" if hollow else TEXT, mec=TEXT, mew=1.5, zorder=3)
-            pts.append((r.retrains, r.mase_post, LABEL.get(name, name), MUTED if hollow else TEXT))
+            pts.append((r.retrains, r.mase_post, label_of(name), MUTED if hollow else TEXT))
         ax.set_title(PANEL[key], loc="left", fontsize=9.5)
         ax.set_xlabel("retrainings per series")
         ax.set_xlim(-8, d.retrains.max() * 1.9 + 10)

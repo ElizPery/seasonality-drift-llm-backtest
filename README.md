@@ -15,8 +15,13 @@
     │
     ├── src/                        # Core service source code
     │   ├── __init__.py
+    │   ├── data/                   # Shared by both streams: loaders, the standard frame, the manifest
+    │   │   ├── uci.py, entsoe.py, seismic_noise.py, alibaba.py, tcpd.py, iquique.py   # one loader per source
+    │   │   ├── frames.py           # standard frame (timestamp, value), series_table, write_series
+    │   │   ├── loader.py           # DataLoader class interface used by stream A
+    │   │   └── export.py           # python -m src.data.export: the stream B series as CSV + manifest.csv
     │   ├── detector/               # Stream A: Drift detectors and decomposition
-    │   │   ├── data_loader.py          # Data loading and standardization (Alibaba, UCI, TCPDBench)
+    │   │   ├── data_loader.py          # Kept import path of DataLoader (the loaders live in src/data)
     │   │   ├── drift_generator.py      # STL decomposition + 3-level benchmark generation
     │   │   ├── baseline_detectors.py   # KS, PSI, ADWIN, Page-Hinkley, KSWIN (River / SciPy)
     │   │   ├── residual_detector.py    # STL decomposition + adaptive conformal intervals on residuals
@@ -29,7 +34,7 @@
     │   │   ├── catalog.py          # Remediation action catalog
     │   │   ├── backtester.py       # Strategies, hindsight oracles, block bootstrap CI of the MASE gain
     │   │   ├── synthetic.py        # Synthetic series from UCI clients (MSTL control series + injected changes)
-    │   │   ├── data_sources.py     # ENTSO-E national load and seismic noise (March 2020 measures)
+    │   │   ├── data_sources.py     # ENTSO-E and seismic noise series with features and labels (loaders in src/data)
     │   │   ├── plots.py            # Figures for the stream B notebook
     │   │   ├── run_backtest.py     # Stream B runner
     │   │   └── llm_client.py       # Instructor + Pydantic v2 schemas for LLM
@@ -150,6 +155,27 @@ done
 ```
 
 
+## Shared data loading (`src/data`)
+
+Both streams read their data through `src/data`. Every loader returns the same standard frame: a DataFrame
+with the columns `timestamp` (start of the interval) and `value` (float64), one row per point in time order.
+`DataLoader` (`src/data/loader.py`, also importable from `src/detector/data_loader.py`) keeps the class
+interface of the stream A scripts and notebooks; `load_uci_electricity` now reads the cleaned hourly client
+table of `src/data/uci.py` (timestamps moved to the interval start, DST hours fixed, cached in
+`data/processed/uci_hourly.parquet`).
+
+The series of stream B (synthetic UCI, ENTSO-E, seismic noise) can be written as standard frames for the
+detectors of stream A:
+
+```bash
+python -m src.data.export            # data/processed/series/: one CSV per series + manifest.csv
+```
+
+`manifest.csv` has one row per series: `id` (`source/series/scenario`), `file`, the labels (`source`,
+`series`, `scenario`, `client`, `seed`, `magnitude`), the length `n`, `start`, and the deployment and
+change points both as positions (`t_deploy`, `t_change`, `t_stop`) and as timestamps (`deploy_at`,
+`change_at`). Detector alarms on these series are matched to the backtest by `id` and `timestamp`.
+
 ## Stream A: Residual Conformal Drift Detection and Evaluation (`src/detector`)
 
 To solve the alert fatigue problem common in seasonal time series (where traditional batch tests like PSI and Wasserstein trigger massive false alarms due to natural seasonality), Stream A implements a **seasonality-aware dual-layer detector**:
@@ -200,6 +226,23 @@ Strategies `llm` (applied as proposed) and `llm_gate` (applied only if the accep
 `data/llm_answers/` (kept in git), so a rerun reads the stored answers and needs no API key. The key is read from
 `~/.config/diploma/anthropic.env` (one line `ANTHROPIC_API_KEY=...`, another path can be set in `LLM_KEY_FILE`).
 
+Decisions on detector alarms (`alarms.py`, the link with stream A): the strategies `alarm_retrain`, `alarm_gate`,
+`alarm_catalog_gate`, `alarm_oracle`, `alarm_rules`, `alarm_rules_gate`, `alarm_llm` and `alarm_llm_gate` take the
+same decisions as their weekly counterparts, but at the first origin after an alarm of a drift detector, then ignore
+alarms for 7 days (`cooldown_days`). They run once per detector in an alerts file: one row per alarm with `id`
+(`source/series/scenario` as in the manifest of `src/data`), `method` and `timestamp` (or `index`); detector
+alarms are matched to the series by `id` and `timestamp`. Every row of `runs.csv` also reports `alarms` (alarms after
+deployment), `acts_pre` (model changes before the change of the series, all of them on a series without one: the cost
+of false alarms or of a fixed calendar) and `reaction_h` (hours from the change to the first model change after it).
+Until the detectors of stream A deliver their alarms, two stand-in detectors run on the same series, both using only
+the past: `profile_conformal` (the residual of each hour from the median of the same hour of the last 4 weeks, a
+conformal threshold on the last 2 weeks of residuals, two consecutive violations, one-day cooldown) and `adwin`
+(ADWIN on the same residuals). Their sensitivity is calibrated per source on a control period without changes (the
+60 synthetic control series; the seismic weeks between deployment and the first measures; the year 2019 of the
+national load) to one false alarm per 14 days: settings calibrated on one source do not carry over to another.
+`data/alerts/detectors.csv` records the chosen settings and the false alarm rate reached (ADWIN does not reach the
+target on the national load even at its strictest setting) and `data/alerts/alerts.csv` their alarms (kept in git).
+
 Data: 240 synthetic series (20 UCI clients x 3 seeds x {no change, level shift 2 sigma, one-week ramp 2 sigma,
 noise x2}, 24 weeks, deployment at week 10, change at week 13), the national load of 8 countries (dataset 5,
 deployment 6 January 2020) and the seismic noise level at 15 stations (dataset 6, hourly log10 on the local clock,
@@ -212,6 +255,9 @@ python -m src.recommendations.run_backtest --tune            # base model valida
 python -m src.recommendations.run_backtest                   # all sources, about 40 minutes on 16 cores
 python -m src.recommendations.run_backtest --sources seismic # recompute one source, keep the other rows
 python -m src.recommendations.run_backtest --advisors rules  # add the advised strategies (rules, llm) to runs.csv
+python -m src.recommendations.alarms                         # stand-in detectors: calibrate, write data/alerts/alerts.csv
+python -m src.recommendations.run_backtest --alerts data/alerts/alerts.csv --advisors rules
+                                                             # add the strategies that review on alarms, per detector
 python -m pytest tests                                       # tests
 ```
 
