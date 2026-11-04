@@ -52,7 +52,7 @@ DELTA = 0.0
 @dataclass(frozen=True)
 class Strategy:
     name: str
-    title_uk: str
+    title: str
     cadence_days: int | None  # how often a decision is taken; None = never
     policy: str  # fixed | oracle | gated | advised
     action: str | None = None  # gated: the only candidate; None = every catalog action except keep
@@ -63,32 +63,32 @@ class Strategy:
 
 
 STRATEGIES = (
-    Strategy("nothing", "нічого не робити", None, "fixed"),
-    Strategy("always", "завжди перенавчати (щодня)", 1, "fixed", "retrain_full"),
-    Strategy("scheduled", "перенавчання за розкладом (щотижня)", 7, "fixed", "retrain_full"),
-    Strategy("scheduled_gate", "перенавчання щотижня, лише якщо бектест підтверджує виграш", 7, "gated", "retrain_full"),
-    Strategy("catalog_gate", "щотижня найкраща дія каталогу з тих, що пройшли бектест", 7, "gated"),
-    Strategy("oracle_weekly", "оракул щотижня: найкраща дія каталогу за фактом на наступному тижні", 7, "oracle"),
-    Strategy("oracle", "ідеальний оракул: найкраща дія каталогу за фактом щодня", 1, "oracle"),
+    Strategy("nothing", "do nothing", None, "fixed"),
+    Strategy("always", "always retrain (daily)", 1, "fixed", "retrain_full"),
+    Strategy("scheduled", "scheduled retraining (weekly)", 7, "fixed", "retrain_full"),
+    Strategy("scheduled_gate", "retrain weekly, only if the backtest check confirms a gain", 7, "gated", "retrain_full"),
+    Strategy("catalog_gate", "weekly, the best catalog action among those that pass the backtest check", 7, "gated"),
+    Strategy("oracle_weekly", "weekly oracle: the best catalog action in hindsight over the next week", 7, "oracle"),
+    Strategy("oracle", "ideal oracle: the best catalog action in hindsight, daily", 1, "oracle"),
 )
 # strategies with an advisor: run only when the advisors are given (`advisors` of `backtest`)
 ADVISED_STRATEGIES = (
-    Strategy("rules", "правила на діагностиці, без бектесту", 7, "advised", advisor="rules"),
-    Strategy("rules_gate", "правила на діагностиці з бектестом", 7, "advised", advisor="rules", gate=True),
-    Strategy("llm", "LLM без бектесту", 7, "advised", advisor="llm"),
-    Strategy("llm_gate", "LLM з діагностикою та бектестом", 7, "advised", advisor="llm", gate=True),
+    Strategy("rules", "rules on the diagnostics, no backtest check", 7, "advised", advisor="rules"),
+    Strategy("rules_gate", "rules on the diagnostics with the backtest check", 7, "advised", advisor="rules", gate=True),
+    Strategy("llm", "LLM, no backtest check", 7, "advised", advisor="llm"),
+    Strategy("llm_gate", "LLM with the diagnostics and the backtest check", 7, "advised", advisor="llm", gate=True),
 )
 # strategies that review the model on a detector alarm: run only when alarms are given (`alerts` of `evaluate_series`);
 # `cadence_days` is the lookahead window of the oracle; the advised ones also need their advisor
 ALARM_STRATEGIES = (
-    Strategy("alarm_retrain", "перенавчання за тривогою детектора, без бектесту", 7, "fixed", "retrain_full", trigger="alarm"),
-    Strategy("alarm_gate", "перенавчання за тривогою, лише якщо бектест підтверджує виграш", 7, "gated", "retrain_full", trigger="alarm"),
-    Strategy("alarm_catalog_gate", "за тривогою найкраща дія каталогу з тих, що пройшли бектест", 7, "gated", trigger="alarm"),
-    Strategy("alarm_oracle", "оракул за тривогою: найкраща дія каталогу за фактом на наступному тижні", 7, "oracle", trigger="alarm"),
-    Strategy("alarm_rules", "за тривогою правила на діагностиці, без бектесту", 7, "advised", advisor="rules", trigger="alarm"),
-    Strategy("alarm_rules_gate", "за тривогою правила на діагностиці з бектестом", 7, "advised", advisor="rules", gate=True, trigger="alarm"),
-    Strategy("alarm_llm", "за тривогою LLM без бектесту", 7, "advised", advisor="llm", trigger="alarm"),
-    Strategy("alarm_llm_gate", "за тривогою LLM з діагностикою та бектестом", 7, "advised", advisor="llm", gate=True, trigger="alarm"),
+    Strategy("alarm_retrain", "retrain on a detector alarm, no backtest check", 7, "fixed", "retrain_full", trigger="alarm"),
+    Strategy("alarm_gate", "retrain on an alarm, only if the backtest check confirms a gain", 7, "gated", "retrain_full", trigger="alarm"),
+    Strategy("alarm_catalog_gate", "on an alarm, the best catalog action among those that pass the backtest check", 7, "gated", trigger="alarm"),
+    Strategy("alarm_oracle", "oracle on an alarm: the best catalog action in hindsight over the next week", 7, "oracle", trigger="alarm"),
+    Strategy("alarm_rules", "on an alarm, rules on the diagnostics, no backtest check", 7, "advised", advisor="rules", trigger="alarm"),
+    Strategy("alarm_rules_gate", "on an alarm, rules on the diagnostics with the backtest check", 7, "advised", advisor="rules", gate=True, trigger="alarm"),
+    Strategy("alarm_llm", "on an alarm, LLM, no backtest check", 7, "advised", advisor="llm", trigger="alarm"),
+    Strategy("alarm_llm_gate", "on an alarm, LLM with the diagnostics and the backtest check", 7, "advised", advisor="llm", gate=True, trigger="alarm"),
 )
 
 

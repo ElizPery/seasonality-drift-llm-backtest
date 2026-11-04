@@ -17,8 +17,7 @@ from src.recommendations.forecast import PROFILE_FEATURE, WEEK, Model, fit_model
 @dataclass(frozen=True)
 class Action:
     name: str
-    title_uk: str
-    title_en: str
+    title: str
     kind: str  # none | retrain | recalibrate | intervals
     window: int | None = None  # training window in hours (None = all history)
     half_life: int | None = None  # exponential sample weights, in hours
@@ -26,17 +25,17 @@ class Action:
 
 
 CATALOG: tuple[Action, ...] = (
-    Action("keep", "нічого не робити", "do nothing", "none"),
-    Action("retrain_full", "перенавчити на всій історії", "retrain on all history", "retrain"),
-    Action("retrain_8w", "перенавчити на останньому вікні (8 тижнів)", "retrain on the last 8 weeks", "retrain", window=8 * WEEK),
-    Action("retrain_2w", "змінити довжину вікна: перенавчити на 2 тижнях", "shorten the training window to 2 weeks", "retrain", window=2 * WEEK),
-    Action("reweight_1w", "перезважити свіжі дані (напіврозпад ваги 1 тиждень)", "reweight recent data (weight half-life 1 week)", "retrain", half_life=WEEK),
-    Action("add_profile", 'додати сезонну ознаку: профіль "година тижня" за 4 тижні', "add a seasonal feature: 4-week hour-of-week profile", "retrain", add_feature=PROFILE_FEATURE),
-    Action("recalibrate_level", "перекалібрувати рівень прогнозу за останній тиждень", "recalibrate the forecast level on the last week", "recalibrate", window=WEEK),
+    Action("keep", "do nothing", "none"),
+    Action("retrain_full", "retrain on all history", "retrain"),
+    Action("retrain_8w", "retrain on the last 8 weeks", "retrain", window=8 * WEEK),
+    Action("retrain_2w", "shorten the training window to 2 weeks", "retrain", window=2 * WEEK),
+    Action("reweight_1w", "reweight recent data (weight half-life 1 week)", "retrain", half_life=WEEK),
+    Action("add_profile", "add a seasonal feature: 4-week hour-of-week profile", "retrain", add_feature=PROFILE_FEATURE),
+    Action("recalibrate_level", "recalibrate the forecast level on the last week", "recalibrate", window=WEEK),
 )
 # changes prediction intervals only, so it is not part of point-forecast (MASE) experiments yet
 INTERVAL_ACTIONS: tuple[Action, ...] = (
-    Action("recalibrate_intervals", "перекалібрувати інтервали прогнозу", "recalibrate prediction intervals", "intervals"),
+    Action("recalibrate_intervals", "recalibrate prediction intervals", "intervals"),
 )
 ACTIONS = {a.name: a for a in CATALOG + INTERVAL_ACTIONS}
 
