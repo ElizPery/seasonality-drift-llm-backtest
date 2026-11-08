@@ -139,8 +139,11 @@ class LLMAdvisor:
     answer is missing from the cache, so a rerun from stored answers needs no API key."""
 
     def __init__(self, model: str = DEFAULT_MODEL, cache_dir: Path = CACHE_DIR, mode=None, max_retries: int = 2,
-                 max_tokens: int = 2048, effort: str | None = "low", client=None):
-        self.name = model
+                 max_tokens: int = 2048, effort: str | None = "low", client=None, with_diagnostics: bool = True):
+        # `with_diagnostics=False` is the ablation: the advisor only learns that a review is due (and the alarm, if any);
+        # its rows carry the name with the suffix "|bare", so both variants can live in one results file
+        self.with_diagnostics = with_diagnostics
+        self.name = model if with_diagnostics else f"{model}|bare"
         self.model, self.mode, self.max_retries, self.max_tokens, self.effort = model, mode, max_retries, max_tokens, effort
         self.cache_dir = Path(cache_dir)
         self._client = client
@@ -160,10 +163,14 @@ class LLMAdvisor:
                 for line in KEY_FILE.read_text().splitlines():
                     if line.strip().startswith("ANTHROPIC_API_KEY="):
                         key = line.split("=", 1)[1].strip().strip('"')
-            self._client = instructor.from_provider(self.model, mode=self.mode or instructor.Mode.JSON, api_key=key)
+            # providers without a key (a local Ollama server) get their own default when no key file is set
+            kw = {"api_key": key} if key else {}
+            self._client = instructor.from_provider(self.model, mode=self.mode or instructor.Mode.JSON, **kw)
         return self._client
 
-    def recommend(self, ctx: dict, repeat: int = 0, with_diagnostics: bool = True) -> Recommendation:
+    def recommend(self, ctx: dict, repeat: int = 0, with_diagnostics: bool | None = None) -> Recommendation:
+        if with_diagnostics is None:
+            with_diagnostics = self.with_diagnostics
         system, user = render_prompt(ctx, with_diagnostics)
         key = cache_key(self.model, system, user, repeat)
         if key in self._cache:

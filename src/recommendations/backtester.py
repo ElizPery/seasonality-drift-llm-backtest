@@ -291,11 +291,15 @@ def evaluate_series(s: dict, params: dict | None = None, strategies=STRATEGIES, 
     naive[t_dep:end] = seasonal_naive(y, np.arange(t_dep, end))
     runs[("naive", None)] = dict(pred=naive, retrains=0, picks=[], end=end)
     gated = {st.name for st in strategies if st.policy in ("gated", "advised")}
+    # advised strategies record which advisor answered (`model`: the LLM model string, "|bare" for the ablation,
+    # or "rules") and the number of the repeated run, so runs of several models and repeats share one file
+    advised = {st.name: advisors[st.advisor].name for st in strategies if st.policy == "advised"}
     labels = {k: v for k, v in s.items() if k not in ("y", "F", "base_features", "start")}
     rows = []
     for (name, d), r in runs.items():
         applied = r.get("applied", [])
-        row = dict(labels, strategy=name, detector=d, scale=scale, retrains=r["retrains"],
+        row = dict(labels, strategy=name, detector=d, model=advised.get(name, np.nan),
+                   repeat=repeat if name in advised else np.nan, scale=scale, retrains=r["retrains"],
                    mase_all=mase(y, r["pred"], t_dep, end, scale),
                    mase_pre=mase(y, r["pred"], t_dep, t_chg, scale) if t_chg and t_chg > t_dep else np.nan,
                    mase_post=mase(y, r["pred"], t_chg, end, scale) if t_chg else np.nan,
@@ -316,17 +320,23 @@ _WORKER: dict = {}  # advisors of a worker process, created on its first series
 
 
 def _job(s, strategies=STRATEGIES, advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None,
-         detectors: tuple[str, ...] = ()):
-    if advisors and "advisors" not in _WORKER:
+         detectors: tuple[str, ...] = (), repeats: int = 1, no_diagnostics: bool = False):
+    if advisors and _WORKER.get("key") != (advisors, llm_model, no_diagnostics):
         from src.recommendations.llm_client import DEFAULT_MODEL, LLMAdvisor, RuleAdvisor
 
-        made = {"rules": RuleAdvisor, "llm": lambda: LLMAdvisor(llm_model or DEFAULT_MODEL)}
+        made = {"rules": RuleAdvisor, "llm": lambda: LLMAdvisor(llm_model or DEFAULT_MODEL, with_diagnostics=not no_diagnostics)}
         _WORKER["advisors"] = {k: made[k]() for k in advisors}
+        _WORKER["key"] = (advisors, llm_model, no_diagnostics)
     mine = None
     if alerts is not None:  # every detector runs on every series; one without alarms on this series gets an empty list
         mine = alerts.get(series_id(s), {})
         mine = {d: mine.get(d, np.array([], dtype=int)) for d in (detectors or sorted(mine))}
-    return evaluate_series(s, LGBM_PARAMS, strategies, _WORKER.get("advisors"), alerts=mine)
+    rows = evaluate_series(s, LGBM_PARAMS, strategies, _WORKER.get("advisors"), alerts=mine)
+    # repeated runs of a non-deterministic advisor: only the advised strategies are run again
+    for r in range(1, repeats if advisors else 1):
+        rows += [row for row in evaluate_series(s, LGBM_PARAMS, strategies, _WORKER.get("advisors"), repeat=r, alerts=mine)
+                 if isinstance(row["model"], str)]
+    return rows
 
 
 def sort_runs(df: pd.DataFrame) -> pd.DataFrame:
@@ -338,11 +348,14 @@ def sort_runs(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_backtests(series: list[dict], processes: int | None = None, log=None, strategies=STRATEGIES,
-                  advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None) -> pd.DataFrame:
-    """`alerts`: alarm positions per series id and detector (see `alarms.read_alerts`) for the alarm strategies."""
+                  advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None,
+                  repeats: int = 1, no_diagnostics: bool = False) -> pd.DataFrame:
+    """`alerts`: alarm positions per series id and detector (see `alarms.read_alerts`) for the alarm strategies.
+    `repeats`: how many times the advised strategies run (column `repeat`); `no_diagnostics`: the LLM ablation."""
     rows = []
     detectors = tuple(sorted({d for per in (alerts or {}).values() for d in per}))
-    job = partial(_job, strategies=strategies, advisors=advisors, llm_model=llm_model, alerts=alerts, detectors=detectors)
+    job = partial(_job, strategies=strategies, advisors=advisors, llm_model=llm_model, alerts=alerts, detectors=detectors,
+                  repeats=repeats, no_diagnostics=no_diagnostics)
     with Pool(processes) as pool:
         for i, rs in enumerate(pool.imap_unordered(job, series, chunksize=1), 1):
             rows.extend(rs)
@@ -378,12 +391,13 @@ def summarize(runs: pd.DataFrame) -> pd.DataFrame:
     r = runs.join(oracle.rename("oracle_post"), on=["source", "series", "scenario"])
     r["regret"] = r.mase_post - r.oracle_post
     r["gain_significant"] = (r.gain_lo > 0).astype(float).where(r.gain_lo.notna())
-    for c in ("decisions", "proposed", "accepted", "check_fits", "detector", "alarms", "acts_pre", "reaction_h"):
-        if c not in r:  # absent in results computed before the acceptance rule or the alarm strategies
+    for c in ("decisions", "proposed", "accepted", "check_fits", "detector", "alarms", "acts_pre", "reaction_h", "model", "repeat"):
+        if c not in r:  # absent in results computed before the acceptance rule, the alarm strategies or the advisors
             r[c] = np.nan
     r["accept_rate"] = r.accepted / r.proposed.fillna(r.decisions).where(lambda x: x > 0)  # share of proposals applied
-    g = r.groupby(["source", "scenario", "strategy", r.detector.fillna("")], sort=False).agg(
-        series=("series", "nunique"), mase_pre=("mase_pre", "mean"), mase_post=("mase_post", "mean"),
+    # means over series and over the repeats of an advisor; `runs` counts rows (series x repeats)
+    g = r.groupby(["source", "scenario", "strategy", r.detector.fillna(""), r.model.fillna("")], sort=False).agg(
+        series=("series", "nunique"), runs=("series", "size"), mase_pre=("mase_pre", "mean"), mase_post=("mase_post", "mean"),
         regret=("regret", "mean"), retrains=("retrains", "mean"), gain_vs_nothing=("gain_vs_nothing", "mean"),
         share_gain_significant=("gain_significant", "mean"), accept_rate=("accept_rate", "mean"),
         check_fits=("check_fits", "mean"), alarms=("alarms", "mean"), acts_pre=("acts_pre", "mean"),

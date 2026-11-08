@@ -95,6 +95,9 @@ def main():
     p.add_argument("--advisors", default=None,
                    help="comma-separated advisors (rules, llm): compute only their strategies and replace their rows in runs.csv")
     p.add_argument("--llm-model", default=None, help='Instructor model string, e.g. "anthropic/claude-haiku-5-5"')
+    p.add_argument("--repeats", type=int, default=1, help="how many times the advised strategies run (column repeat)")
+    p.add_argument("--no-diagnostics", action="store_true",
+                   help="ablation: the LLM advisor sees no diagnostics, only that a review is due (model name gets |bare)")
     p.add_argument("--alerts", default=None,
                    help="alerts CSV (see alarms.py): compute only the strategies that review on alarms, once per detector in the "
                         "file (the advised ones for the advisors given), and replace their rows in runs.csv")
@@ -147,12 +150,15 @@ def main():
                 alerts = None
                 strategies = (STRATEGIES[0],) + tuple(st for st in ADVISED_STRATEGIES if st.advisor in advisors)
             new = run_backtests(series, args.processes, log=sys.stderr, strategies=strategies, advisors=advisors,
-                                llm_model=args.llm_model, alerts=alerts)
+                                llm_model=args.llm_model, alerts=alerts, repeats=args.repeats, no_diagnostics=args.no_diagnostics)
             new = new[new.strategy.isin([st.name for st in strategies[1:]])]
             prev = pd.read_csv(out / "runs.csv", float_precision="round_trip")
-            if "detector" not in prev:
-                prev["detector"] = float("nan")
+            for c in ("detector", "model", "repeat"):
+                if c not in prev:
+                    prev[c] = float("nan")
+            # rows of the same source, strategy and advisor model are replaced; rows of other models stay
             same = prev.source.isin(new.source.unique()) & prev.strategy.isin(new.strategy.unique())
+            same &= prev.model.isna() | prev.model.isin(new.model.dropna().unique())
             if args.alerts:
                 same &= prev.detector.isin(new.detector.unique())
             runs = sort_runs(pd.concat([prev[~same], new], ignore_index=True))

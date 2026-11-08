@@ -91,3 +91,32 @@ def test_advised_strategies_in_the_backtest():
     for r in rules.values():
         assert r["accepted"] <= r["proposed"] <= r["decisions"] == ref["decisions"]
     assert rules["rules"]["accepted"] == rules["rules"]["proposed"] > 0  # without the check every proposal is applied
+
+
+def test_bare_advisor_gets_a_tagged_name_and_a_prompt_without_numbers(tmp_path):
+    y, _ = toy()
+    ctx = diagnostics(y, y + 1.0, T_DEPLOY + 3 * WEEK, T_DEPLOY, 5.0, T_DEPLOY)
+    stub = StubClient("keep")
+    bare = LLMAdvisor("ollama/test-model", cache_dir=tmp_path, client=stub, with_diagnostics=False)
+    assert bare.name == "ollama/test-model|bare"
+    bare.recommend(ctx)
+    record = next(iter(bare._cache.values()))
+    assert record["with_diagnostics"] is False and "MASE" not in record["user"]
+    full = LLMAdvisor("ollama/test-model", cache_dir=tmp_path, client=stub)
+    full.recommend(ctx)
+    assert stub.calls == 2  # the bare and the full prompt are different cache keys
+
+
+def test_job_repeats_the_advised_strategies_and_tags_the_model():
+    import pandas as pd
+
+    from src.recommendations.backtester import _job
+    from tests.test_alarms import series_dict
+
+    y, F = toy(shift=15)
+    strategies = (STRATEGIES[0],) + tuple(st for st in ADVISED_STRATEGIES if st.advisor == "rules")
+    rows = pd.DataFrame(_job(series_dict(y, F), strategies=strategies, advisors=("rules",), repeats=2))
+    assert (rows.strategy == "nothing").sum() == 1 and (rows.strategy == "naive").sum() == 1
+    rules = rows[rows.strategy == "rules"]
+    assert sorted(rules.repeat) == [0, 1] and (rules.model == "rules").all()
+    assert rows[rows.strategy == "nothing"].model.isna().all()
