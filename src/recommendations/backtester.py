@@ -47,6 +47,7 @@ from src.recommendations.llm_client import diagnostics
 VAL_WEEKS = 2
 GATE_BLOCK_DAYS = 3
 DELTA = 0.0
+SKIPPED = f"fewer than {VAL_WEEKS} weeks of own forecasts to check against"
 
 
 @dataclass(frozen=True)
@@ -139,110 +140,158 @@ def check_action(a, model: Model, y: np.ndarray, F: dict[str, np.ndarray], pred:
     return dict(action=a.name, gain=g, lo=lo, hi=hi, accepted=bool(lo > delta), fits=fits)
 
 
+class StrategyRun:
+    """One strategy on one series, one origin at a time. `step(T, alarms)` takes the decision due at origin T, if
+    any, and then forecasts the day [T, T + 24). `backtest` drives it over the whole series, and the monitoring
+    service (`src.api`) drives it as the data arrive, so both take exactly the same decisions. `alarms` are the
+    alarm positions of the detector known at T (the backtest passes all of them; only those before T count).
+    Every decision is also kept in `records`: when and why it was taken, what the advisor proposed and why, the
+    checks of the acceptance rule and the action applied."""
+
+    def __init__(self, y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: Strategy,
+                 base_features: tuple[str, ...], params: dict | None = None, catalog=CATALOG, cache: dict | None = None,
+                 advisors: dict | None = None, repeat: int = 0, detector: str | None = None):
+        self.y, self.F, self.t_deploy, self.strategy, self.catalog = y, F, t_deploy, strategy, catalog
+        self.advisors, self.repeat, self.detector = advisors, repeat, detector
+        self.origins = list(range(t_deploy, len(y) - DAY + 1, DAY))
+        self.end = self.origins[-1] + DAY
+        self.cache = {} if cache is None else cache
+        self.act = make_actor(F, y, base_features, params, self.cache)
+        self.scale = mase_scale(y[:t_deploy])
+        self.model, _ = self.act(ACTIONS["retrain_full"], Model(base_features), t_deploy)
+        self.pred = np.full(len(y), np.nan)
+        self.retrains, self.picks, self.applied, self.records = 0, [], [], []
+        self.decisions = self.proposed = self.accepted = self.check_fits = 0
+        self.last_change = t_deploy
+        self.seen = None  # alarms consumed or ignored so far; set at the first step
+        self.last_review = t_deploy - strategy.cooldown_days * DAY
+
+    def step(self, T: int, alarms: np.ndarray | None = None) -> dict | None:
+        """The decision due at origin T (returns its record, or None if no decision was due), then the forecast
+        of the day [T, T + 24). An alarm strategy reviews the model at the first origin after an alarm (alarms
+        before the origin are known, the origin itself is not) and then ignores alarms for `cooldown_days`;
+        alarms before deployment are ignored."""
+        st = self.strategy
+        alarm = None
+        if st.trigger == "alarm":
+            alarms = np.asarray([] if alarms is None else alarms, dtype=int)
+            if self.seen is None:
+                self.seen = int(np.searchsorted(alarms, self.t_deploy))
+            known = int(np.searchsorted(alarms, T))  # alarms before this origin
+            if T - self.last_review < st.cooldown_days * DAY:
+                self.seen = known
+            due = known > self.seen
+            if due:
+                alarm = dict(method=self.detector, hours_ago=int(T - alarms[known - 1]))
+                self.seen, self.last_review = known, T
+        else:
+            k = (T - self.t_deploy) // DAY
+            due = bool(st.cadence_days) and k > 0 and k % st.cadence_days == 0
+        record = self._decide(T, alarm) if due else None
+        rows = np.arange(T, T + DAY)
+        self.pred[rows] = self.model.predict(self.F, rows)
+        return record
+
+    def _decide(self, T: int, alarm: dict | None) -> dict:
+        st, y, F, act = self.strategy, self.y, self.F, self.act
+        rec = dict(origin=T, trigger=st.trigger, alarm=alarm, proposal=None, reason=None, checks=[], action="keep", fits=0)
+        changed = False
+        if st.policy == "fixed":
+            self.model, fits = act(ACTIONS[st.action], self.model, T)
+            self.retrains += fits
+            rec.update(proposal=st.action, action=st.action, fits=fits)
+            changed = True
+        elif st.policy == "gated":
+            if T - VAL_WEEKS * WEEK >= self.t_deploy:
+                cands = [ACTIONS[st.action]] if st.action else [a for a in self.catalog if a.kind != "none"]
+                checks = [check_action(a, self.model, y, F, self.pred, T, self.scale, act) for a in cands]
+                self.check_fits += sum(c["fits"] for c in checks)
+                ok = [c for c in checks if c["accepted"]]
+                self.decisions += 1
+                self.proposed += 1
+                rec["checks"] = checks
+                if ok:  # ties go to the earlier, cheaper action of the catalog
+                    best = max(ok, key=lambda c: c["lo"])["action"]
+                    self.model, fits = act(ACTIONS[best], self.model, T)
+                    self.retrains += fits
+                    self.accepted += 1
+                    changed = True
+                    rec.update(proposal=best, action=best, fits=fits)
+                self.picks.append(best if ok else "keep")
+            else:
+                rec["skipped"] = SKIPPED
+        elif st.policy == "advised":
+            if T - VAL_WEEKS * WEEK >= self.t_deploy:
+                ctx = diagnostics(y, self.pred, T, self.t_deploy, self.scale, self.last_change, alarm=alarm)
+                answer = self.advisors[st.advisor].recommend(ctx, self.repeat)
+                a = ACTIONS[answer.action]
+                self.decisions += 1
+                rec.update(proposal=a.name, reason=answer.reason, diagnostics=ctx)
+                ok = a.kind != "none"
+                if ok:
+                    self.proposed += 1
+                    if st.gate:
+                        c = check_action(a, self.model, y, F, self.pred, T, self.scale, act)
+                        self.check_fits += c["fits"]
+                        ok = c["accepted"]
+                        rec["checks"] = [c]
+                if ok:
+                    self.model, fits = act(a, self.model, T)
+                    self.retrains += fits
+                    self.accepted += 1
+                    self.last_change = T
+                    changed = True
+                    rec.update(action=a.name, fits=fits)
+                self.picks.append(a.name if ok else "keep")
+            else:
+                rec["skipped"] = SKIPPED
+        else:  # hindsight oracle: best action on the next decision window
+            rows = np.arange(T, min(T + st.cadence_days * DAY, self.end))
+            best = None
+            for a in self.catalog:  # `keep` first, so ties go to the cheapest action
+                m_a, fits = act(a, self.model, T)
+                err = float(np.nanmean(np.abs(y[rows] - m_a.predict(F, rows))))
+                if best is None or err < best[0] - 1e-12:
+                    best = (err, a.name, m_a, fits)
+            _, name, self.model, fits = best
+            self.retrains += fits
+            self.picks.append(name)
+            changed = name != "keep"
+            rec.update(proposal=name, action=name, fits=fits)
+        if changed:
+            self.applied.append(T)
+        rec["changed"] = changed
+        self.records.append(rec)
+        return rec
+
+    def result(self, alarms: np.ndarray | None = None) -> dict:
+        alarms = np.asarray([] if alarms is None else alarms, dtype=int)
+        return dict(pred=self.pred, retrains=self.retrains, picks=self.picks, end=self.end, decisions=self.decisions,
+                    proposed=self.proposed, accepted=self.accepted, check_fits=self.check_fits, applied=self.applied,
+                    alarms=int(((alarms >= self.t_deploy) & (alarms < self.end)).sum()))
+
+
 def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: Strategy, base_features: tuple[str, ...],
              params: dict | None = None, catalog=CATALOG, cache: dict | None = None, prune_cache: bool = False,
              advisors: dict | None = None, repeat: int = 0, alarms=None, detector: str | None = None) -> dict:
-    """Rolling day-ahead forecasts from `t_deploy` to the end of the series under one strategy.
+    """Rolling day-ahead forecasts from `t_deploy` to the end of the series under one strategy (see `StrategyRun`).
 
     Retraining fits are shared through `cache` between strategies of the same series (see `make_actor`).
     With `prune_cache` (last strategy of a series) fits older than the check window are dropped as the run
     moves on, which bounds memory. Gated and advised strategies decide only once they have `VAL_WEEKS`
     weeks of their own forecasts to check against. `advisors` maps advisor keys to objects with
     `recommend(context, repeat)`; `repeat` numbers repeated runs of a non-deterministic advisor.
-    `alarms` are the positions of the alarms of the detector `detector` on this series: a strategy with
-    `trigger="alarm"` reviews the model at the first origin after an alarm (alarms before the origin are
-    known, the origin itself is not), then ignores alarms for `cooldown_days`; alarms before deployment are
-    ignored. Counters: `decisions` (review points), `proposed` (proposals of a change), `accepted` (changes
-    applied), `applied` (origins at which the model was changed), `alarms` (alarms after deployment)."""
-    n = len(y)
-    origins = list(range(t_deploy, n - DAY + 1, DAY))
-    end = origins[-1] + DAY
-    cache = {} if cache is None else cache
-    act = make_actor(F, y, base_features, params, cache)
-    scale = mase_scale(y[:t_deploy])
+    `alarms` are the positions of the alarms of the detector `detector` on this series. Counters: `decisions`
+    (review points), `proposed` (proposals of a change), `accepted` (changes applied), `applied` (origins at which
+    the model was changed), `alarms` (alarms after deployment)."""
+    run = StrategyRun(y, F, t_deploy, strategy, base_features, params, catalog, cache, advisors, repeat, detector)
     alarms = np.sort(np.asarray([] if alarms is None else alarms, dtype=int))
-
-    model, _ = act(ACTIONS["retrain_full"], Model(base_features), t_deploy)
-    pred = np.full(n, np.nan)
-    retrains, picks, applied = 0, [], []
-    decisions = proposed = accepted = check_fits = 0
-    last_change = t_deploy
-    seen = int(np.searchsorted(alarms, t_deploy))  # alarms consumed or ignored so far
-    last_review = t_deploy - strategy.cooldown_days * DAY
-    for k, T in enumerate(origins):
-        alarm = None
-        if strategy.trigger == "alarm":
-            known = int(np.searchsorted(alarms, T))  # alarms before this origin
-            if T - last_review < strategy.cooldown_days * DAY:
-                seen = known
-            due = known > seen
-            if due:
-                alarm = dict(method=detector, hours_ago=int(T - alarms[known - 1]))
-                seen, last_review = known, T
-        else:
-            due = bool(strategy.cadence_days) and k > 0 and k % strategy.cadence_days == 0
-        if due:
-            changed = False
-            if strategy.policy == "fixed":
-                model, fits = act(ACTIONS[strategy.action], model, T)
-                retrains += fits
-                changed = True
-            elif strategy.policy == "gated":
-                if T - VAL_WEEKS * WEEK >= t_deploy:
-                    cands = [ACTIONS[strategy.action]] if strategy.action else [a for a in catalog if a.kind != "none"]
-                    checks = [check_action(a, model, y, F, pred, T, scale, act) for a in cands]
-                    check_fits += sum(c["fits"] for c in checks)
-                    ok = [c for c in checks if c["accepted"]]
-                    decisions += 1
-                    proposed += 1
-                    if ok:  # ties go to the earlier, cheaper action of the catalog
-                        best = max(ok, key=lambda c: c["lo"])["action"]
-                        model, fits = act(ACTIONS[best], model, T)
-                        retrains += fits
-                        accepted += 1
-                        changed = True
-                    picks.append(best if ok else "keep")
-            elif strategy.policy == "advised":
-                if T - VAL_WEEKS * WEEK >= t_deploy:
-                    ctx = diagnostics(y, pred, T, t_deploy, scale, last_change, alarm=alarm)
-                    a = ACTIONS[advisors[strategy.advisor].recommend(ctx, repeat).action]
-                    decisions += 1
-                    ok = a.kind != "none"
-                    if ok:
-                        proposed += 1
-                        if strategy.gate:
-                            c = check_action(a, model, y, F, pred, T, scale, act)
-                            check_fits += c["fits"]
-                            ok = c["accepted"]
-                    if ok:
-                        model, fits = act(a, model, T)
-                        retrains += fits
-                        accepted += 1
-                        last_change = T
-                        changed = True
-                    picks.append(a.name if ok else "keep")
-            else:  # hindsight oracle: best action on the next decision window
-                rows = np.arange(T, min(T + strategy.cadence_days * DAY, end))
-                best = None
-                for a in catalog:  # `keep` first, so ties go to the cheapest action
-                    m_a, fits = act(a, model, T)
-                    err = float(np.nanmean(np.abs(y[rows] - m_a.predict(F, rows))))
-                    if best is None or err < best[0] - 1e-12:
-                        best = (err, a.name, m_a, fits)
-                _, name, model, fits = best
-                retrains += fits
-                picks.append(name)
-                changed = name != "keep"
-            if changed:
-                applied.append(T)
-        rows = np.arange(T, T + DAY)
-        pred[rows] = model.predict(F, rows)
+    for T in run.origins:
+        run.step(T, alarms)
         if prune_cache:
-            for key in [key for key in cache if key[1] <= T - VAL_WEEKS * WEEK]:
-                del cache[key]
-    return dict(pred=pred, retrains=retrains, picks=picks, end=end, decisions=decisions, proposed=proposed,
-                accepted=accepted, check_fits=check_fits, applied=applied,
-                alarms=int(((alarms >= t_deploy) & (alarms < end)).sum()))
+            for key in [key for key in run.cache if key[1] <= T - VAL_WEEKS * WEEK]:
+                del run.cache[key]
+    return run.result(alarms)
 
 
 def mase(y: np.ndarray, pred: np.ndarray, start: int, stop: int, scale: float) -> float:
