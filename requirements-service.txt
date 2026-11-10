@@ -1,0 +1,11 @@
+# Monitoring service (Docker image): only what src.api needs; the versions of the experiments
+numpy==2.2.6
+pandas==2.3.3
+scipy==1.15.3
+lightgbm==4.7.0
+river==0.26.1
+pydantic==2.14.2
+fastapi==0.162.2
+uvicorn==0.54.0
+prometheus-client==0.26.0
+psycopg[binary]==3.3.8

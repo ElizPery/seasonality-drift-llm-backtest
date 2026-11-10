@@ -37,23 +37,29 @@
     │   │   ├── data_sources.py     # ENTSO-E and seismic noise series with features and labels (loaders in src/data)
     │   │   ├── plots.py            # Figures for the stream B notebook
     │   │   ├── run_backtest.py     # Stream B runner
-    │   │   └── llm_client.py       # Instructor + Pydantic v2 schemas for LLM
+    │   │   ├── llm_client.py       # Instructor + Pydantic v2 schemas for LLM
+    │   │   ├── alarms.py           # stand-in detectors (batch and online), alerts file
+    │   │   └── monitor.py          # Monitor: the decision loop as the data arrive (engine of the service)
     │   │
     │   ├── api/                    # MLOps microservice
     │   │   ├── __init__.py
-    │   │   ├── main.py             # FastAPI application (/detect, /recommendations endpoints)
+    │   │   ├── main.py             # FastAPI application (sessions, /detect, /recommendations, /metrics)
+    │   │   ├── sessions.py         # sessions playing a series in the background
+    │   │   ├── store.py            # history of the sessions in PostgreSQL (for Grafana)
     │   │   └── schemas.py          # Pydantic schemas for API requests/responses
     │   │
     │   └── monitoring/             # Infrastructure integration
     │       ├── __init__.py
-    │       └── metrics.py          # Prometheus metrics (prom_client)
+    │       └── metrics.py          # Prometheus metrics (prometheus_client)
     │
     ├── tests/                      # Automated tests (Pytest)
     │   ├── test_detector.py
     │   └── test_backtester.py
     │
-    ├── docker-compose.yml          # Local deployment (FastAPI, MLflow, Prometheus, Grafana)
+    ├── deploy/                     # Prometheus configuration, Grafana data sources and dashboards
+    ├── docker-compose.yml          # Local deployment (FastAPI, PostgreSQL, Prometheus, Grafana)
     ├── Dockerfile                  # FastAPI service containerization
+    ├── requirements-service.txt    # Dependencies of the service image
     ├── requirements.txt            # Python 3.11+ dependencies
     └── README.md                   # Project description and setup instructions
 ```
@@ -264,3 +270,60 @@ python -m pytest tests                                       # tests
 Results are written to `data/processed/stream_b/` (`runs.csv`, `summary.csv`, `oracle_picks.csv`, `tune.csv`,
 `example_*.csv`); tables and figures are in `notebooks/02_stream_b_baselines.ipynb`. The published results were
 computed with Python 3.12, numpy 2.2.6, pandas 2.3.3, statsmodels 0.15.0 and lightgbm 4.7.0.
+
+## Monitoring Service (`src/api`, `src/monitoring`, Docker)
+
+The service runs the decision loop of stream B on a deployed model as the data arrive. A **session** plays one
+exported series hour by hour from the deployment of the model: every day at 00:00 the model forecasts the next 24
+hours, each new value is compared with its forecast and fed to a drift detector, and on an alarm (or on the calendar,
+for the weekly strategies) the strategy reviews the model: the advisor proposes a catalog action, the acceptance rule
+replays it on the last two weeks, and the action is applied only if the lower bound of the 95% interval of the gain is
+above 0. A second run of `nothing` on the same series shows the error the model would have without any change.
+
+The decisions are taken by the code of the backtest (`StrategyRun` in `backtester.py`, the loop that `backtest` also
+drives), and the stand-in detectors run one value at a time (`OnlineDetector` in `alarms.py`) with the alarms of the
+batch functions. A series played to its end therefore gives the numbers of `runs.csv`: for example, the national load
+of Portugal under `alarm_rules_gate` with `profile_conformal` ends with 9 alarms, 6 reviews, no model change and MASE
+after the change 0.7548643518593062, the value in `runs.csv`. `tests/test_monitor.py` and `tests/test_api.py` check
+this on a small series.
+
+- `src/recommendations/monitor.py`: `Monitor`, the engine of a session (no web code).
+- `src/api/main.py`: FastAPI application; `sessions.py` (sessions playing in the background), `store.py` (history
+  in PostgreSQL for Grafana), `schemas.py` (requests and answers).
+- `src/monitoring/metrics.py`: Prometheus metrics, served at `/metrics/`.
+- `docker-compose.yml`, `Dockerfile`, `requirements-service.txt`: the API, PostgreSQL, Prometheus and Grafana;
+  `deploy/` holds the Prometheus configuration and the provisioned Grafana data sources and dashboards.
+
+#### Run:
+```bash
+python -m src.data.export                 # once: the series the service plays, in data/processed/series
+docker compose up --build -d              # API http://localhost:8000/docs, Grafana http://localhost:3000, Prometheus :9090
+curl -X POST localhost:8000/sessions -H 'content-type: application/json' \
+     -d '{"series_id": "seismic/IV.MILN/lockdown_2020", "strategy": "alarm_rules_gate", "detector": "profile_conformal", "speed": 12}'
+                                          # the answer has `grafana_url`: the dashboard of this session around the change
+docker compose down                       # stop (add -v to delete the history)
+uvicorn src.api.main:app --port 8000      # or without Docker: no history for Grafana, the API and the metrics stay
+```
+
+Endpoints: `GET /series`, `GET /strategies` (strategies, detectors, calibrated settings, catalog), `POST /sessions`
+(series, strategy, detector, `speed` in hours of data per second, `skip_to_days_before_change`, `paused`),
+`GET /sessions`, `GET|PATCH|DELETE /sessions/{id}` (state, errors, counters; speed and pause),
+`POST /sessions/{id}/advance` (read hours at once), `GET /sessions/{id}/reviews` (every review: trigger, proposal and
+reason of the advisor, checks with gain and interval, action, time taken), `POST /recommendations` (what the advisor
+proposes now and whether the check confirms it, without applying it), `POST /detect` (alarms of a stand-in detector on
+an exported series or on posted values), `GET /health`, `GET /metrics/`.
+
+Grafana (anonymous view, admin/admin to edit): **Drift monitor** shows a session on the clock of the series: the values
+and both forecasts, the error over the last 7 days, the alarms and reviews as marks, and the table of reviews with the
+gain and its interval. **Drift service** shows the live service metrics: requests and latency, sessions, hours read
+per second, reviews by outcome, time of a review, model fits for actions and for checks, CPU and memory.
+
+Prometheus metrics (labels `session`, `series`, `strategy`, `detector`): `drift_hours_read_total`, `drift_value`,
+`drift_forecast{model}`, `drift_mase_7d{model}`, `drift_series_time_seconds`, `drift_alarms_total`,
+`drift_reviews_total{trigger}`, `drift_review_outcomes_total{outcome}`, `drift_model_fits_total{purpose}`,
+`drift_model_changes`, `drift_last_check_lower_bound`, `drift_review_seconds`, `drift_sessions{state}`,
+`drift_api_requests_total`, `drift_api_request_seconds`.
+
+Not yet in the service: the LLM advisor inside the Docker image (the image has no Instructor client; outside Docker the
+`llm` strategies work with `llm_model`), the model registry in MLflow, and the detectors of stream A (the service plays
+the stand-in detectors until their alarms come as a function or a file).
