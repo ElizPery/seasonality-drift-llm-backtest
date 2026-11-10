@@ -264,3 +264,16 @@ python -m pytest tests                                       # tests
 Results are written to `data/processed/stream_b/` (`runs.csv`, `summary.csv`, `oracle_picks.csv`, `tune.csv`,
 `example_*.csv`); tables and figures are in `notebooks/02_stream_b_baselines.ipynb`. The published results were
 computed with Python 3.12, numpy 2.2.6, pandas 2.3.3, statsmodels 0.15.0 and lightgbm 4.7.0.
+
+#### Statistical comparison of the strategies
+
+`src/recommendations/stats_tests.py` compares the strategies over the series with the rank tests recommended by
+Demsar (2006): per series the strategies are ranked by MASE after the change (on the control series by MASE after
+deployment), the Friedman test and its Iman-Davenport form check whether the average ranks differ, the Nemenyi critical
+difference shows which differences of average rank are significant, and paired Wilcoxon signed-rank tests with the
+Holm correction check the comparisons behind the claims (the checked schedule against the plain one, the rules with
+and without the check and against doing nothing, retraining on alarm against the calendar, the best checked action
+against the weekly oracle). The groups are the national load, the seismic noise, both together, and each synthetic
+scenario; the ranking contains the 17 deployable strategies, the oracles and the seasonal naive forecast are
+references. `notebooks/05_stream_b_statistical_tests.ipynb` reads `runs.csv` and shows the tables and the critical
+difference diagrams.
