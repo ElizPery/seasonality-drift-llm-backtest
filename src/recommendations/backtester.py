@@ -11,10 +11,12 @@ changed and how:
                    the highest lower bound of the gain (or keep the model if none passes): the deployable
                    counterpart of `oracle_weekly`, and the reference for LLM recommendations with a backtest;
 * oracle_weekly  - once a week, apply the catalog action with the lowest error on the following week,
-                   chosen in hindsight: the ceiling for any weekly policy (it is never worse than
-                   `scheduled`), and the reference for LLM recommendations that are taken at a few points;
+                   chosen in hindsight: the reference for weekly policies and for LLM recommendations that are
+                   taken at a few points. It chooses greedily from the current model, so it is not a strict
+                   bound: it was never worse than `scheduled` on the 263 series, but `always` beats it on 51;
 * oracle         - the same every day with a one-day lookahead: the ideal ceiling (never worse than `always`).
-The oracles use future data, so they cannot be deployed; they only bound what any policy can reach.
+The oracles use future data, so they cannot be deployed; they show how far a policy with the same decision points
+could go.
 
 The strategies with `trigger="alarm"` (`ALARM_STRATEGIES`) take the same decisions, but at the first origin
 after an alarm of a drift detector instead of on a calendar, then ignore alarms for `cooldown_days`: this is
