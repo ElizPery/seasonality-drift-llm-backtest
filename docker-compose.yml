@@ -1,0 +1,64 @@
+# Local deployment of the monitoring service: the API, PostgreSQL (history for Grafana), Prometheus and Grafana.
+#   python -m src.data.export      # once: the series the service plays (data/processed/series)
+#   docker compose up --build -d   # API http://localhost:8000/docs, Grafana http://localhost:3000, Prometheus http://localhost:9090
+name: drift-monitor
+
+services:
+  api:
+    build: .
+    image: drift-monitor-api:0.1.0
+    environment:
+      DATABASE_URL: postgresql://drift:drift@db:5432/drift
+      GRAFANA_URL: http://localhost:3000
+    volumes:
+      - ./data/processed/series:/app/data/processed/series:ro
+      - ./data/alerts:/app/data/alerts:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: drift
+      POSTGRES_PASSWORD: drift
+      POSTGRES_DB: drift
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drift -d drift"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:13.0.12
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/drift-monitor.json
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - db
+
+volumes:
+  db-data:
