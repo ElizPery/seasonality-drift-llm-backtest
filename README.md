@@ -318,6 +318,10 @@ and both forecasts, the error over the last 7 days, the alarms and reviews as ma
 gain and its interval. **Drift service** shows the live service metrics: requests and latency, sessions, hours read
 per second, reviews by outcome, time of a review, model fits for actions and for checks, CPU and memory.
 
+![Drift monitor: the seismic noise of Milan in 2020 played with alarm_rules_gate and the profile_conformal detector](docs/images/grafana_drift_monitor_milan.png)
+
+![Drift service: live metrics of the service while two sessions play](docs/images/grafana_drift_service.png)
+
 Prometheus metrics (labels `session`, `series`, `strategy`, `detector`): `drift_hours_read_total`, `drift_value`,
 `drift_forecast{model}`, `drift_mase_7d{model}`, `drift_series_time_seconds`, `drift_alarms_total`,
 `drift_reviews_total{trigger}`, `drift_review_outcomes_total{outcome}`, `drift_model_fits_total{purpose}`,
