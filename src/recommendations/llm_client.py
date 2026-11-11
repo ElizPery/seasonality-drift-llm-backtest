@@ -99,7 +99,7 @@ Which action do you choose?"""
 
 def render_prompt(ctx: dict, with_diagnostics: bool = True) -> tuple[str, str]:
     """System and user messages. Without diagnostics (ablation) the advisor only knows that a review is due."""
-    catalog = "\n".join(f'- {a.name}: {a.title_en} ({"retrains the model" if a.kind == "retrain" else "no retraining"})'
+    catalog = "\n".join(f'- {a.name}: {a.title} ({"retrains the model" if a.kind == "retrain" else "no retraining"})'
                         for a in CATALOG)
     alarm = ctx.get("alarm")
     alarm_text = (f"a drift detector ({alarm['method']}) raised an alarm {alarm['hours_ago']} hours ago" if alarm

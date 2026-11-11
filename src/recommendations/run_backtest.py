@@ -7,6 +7,8 @@ on synthetic UCI series, ENTSO-E national load and seismic noise.
     python -m src.recommendations.run_backtest --sources seismic   # recompute one source, keep the other rows
     python -m src.recommendations.run_backtest --report            # rebuild the summaries without recomputing
     python -m src.recommendations.run_backtest --advisors rules    # add the advised strategies (rules, llm) to runs.csv
+    python -m src.recommendations.run_backtest --alerts data/alerts/alerts.csv --advisors rules
+                                                                   # add the strategies that review on detector alarms
     python -m src.recommendations.run_backtest --strata            # seasonal strength and group of every series
 
 Results go to data/processed/stream_b/ as CSV; the figures are drawn in notebooks/02_stream_b_baselines.ipynb.
@@ -20,8 +22,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.recommendations.backtester import (ADVISED_STRATEGIES, STRATEGIES, backtest, oracle_picks, run_backtests, sort_runs,
-                                            summarize, tune_base_model)
+from src.data.frames import series_table
+from src.recommendations.alarms import read_alerts
+from src.recommendations.backtester import (ADVISED_STRATEGIES, ALARM_STRATEGIES, STRATEGIES, backtest, oracle_picks,
+                                            run_backtests, sort_runs, summarize, tune_base_model)
 from src.recommendations.data_sources import entsoe_series, seismic_series
 from src.recommendations.forecast import LGBM_PARAMS, WEEK, mase_scale
 from src.recommendations.plots import example_frame
@@ -91,6 +95,9 @@ def main():
     p.add_argument("--advisors", default=None,
                    help="comma-separated advisors (rules, llm): compute only their strategies and replace their rows in runs.csv")
     p.add_argument("--llm-model", default=None, help='Instructor model string, e.g. "anthropic/claude-haiku-5-5"')
+    p.add_argument("--alerts", default=None,
+                   help="alerts CSV (see alarms.py): compute only the strategies that review on alarms, once per detector in the "
+                        "file (the advised ones for the advisors given), and replace their rows in runs.csv")
     p.add_argument("--strata", action="store_true", help="write strata.csv: seasonal strength and group of every series")
     args = p.parse_args()
 
@@ -112,8 +119,8 @@ def main():
     advisors = tuple(args.advisors.split(",")) if args.advisors else ()
     if set(advisors) - {"rules", "llm"}:
         raise SystemExit(f"unknown advisors: {', '.join(sorted(set(advisors) - {'rules', 'llm'}))}")
-    if advisors and not (out / "runs.csv").exists():
-        raise SystemExit("run the reference strategies first: the advised ones are added to an existing runs.csv")
+    if (advisors or args.alerts) and not (out / "runs.csv").exists():
+        raise SystemExit("run the reference strategies first: the advised and alarm strategies are added to an existing runs.csv")
     if args.tune:
         run_tune(models, real, args.processes, out)
         return
@@ -131,18 +138,27 @@ def main():
         series += synthetic_series(models(), list(range(args.seeds))) if "synthetic" in todo else []
         if not series:
             raise SystemExit("no series to compute: the data of the listed sources is missing")
-        if advisors:
+        if advisors or args.alerts:
             # "nothing" is the reference of the gains; it is recomputed and dropped, the stored rows are kept
-            strategies = (STRATEGIES[0],) + tuple(st for st in ADVISED_STRATEGIES if st.advisor in advisors)
+            if args.alerts:
+                alerts = read_alerts(args.alerts, series_table(series))
+                strategies = (STRATEGIES[0],) + tuple(st for st in ALARM_STRATEGIES if st.advisor is None or st.advisor in advisors)
+            else:
+                alerts = None
+                strategies = (STRATEGIES[0],) + tuple(st for st in ADVISED_STRATEGIES if st.advisor in advisors)
             new = run_backtests(series, args.processes, log=sys.stderr, strategies=strategies, advisors=advisors,
-                                llm_model=args.llm_model)
+                                llm_model=args.llm_model, alerts=alerts)
             new = new[new.strategy.isin([st.name for st in strategies[1:]])]
             prev = pd.read_csv(out / "runs.csv", float_precision="round_trip")
+            if "detector" not in prev:
+                prev["detector"] = float("nan")
             same = prev.source.isin(new.source.unique()) & prev.strategy.isin(new.strategy.unique())
+            if args.alerts:
+                same &= prev.detector.isin(new.detector.unique())
             runs = sort_runs(pd.concat([prev[~same], new], ignore_index=True))
         else:
             runs = run_backtests(series, args.processes, log=sys.stderr)
-        if args.sources and not advisors and (out / "runs.csv").exists():  # only the listed sources were recomputed
+        if args.sources and not (advisors or args.alerts) and (out / "runs.csv").exists():  # only the listed sources were recomputed
             prev = pd.read_csv(out / "runs.csv", float_precision="round_trip")  # unchanged rows stay byte-identical
             runs = sort_runs(pd.concat([prev[~prev.source.isin(runs.source.unique())], runs], ignore_index=True))
         runs.to_csv(out / "runs.csv", index=False)

@@ -1,9 +1,6 @@
 """Synthetic series for stream B, built from UCI ElectricityLoadDiagrams 2011-2014 clients.
 
-Raw file: LD2011_2014.txt, 370 clients, 15-minute kW values, timestamps mark the end of each interval.
-Known quirks (from the dataset description): clients that joined later have zeros before their start;
-on the March DST day the 01:00-02:00 values are zero for all clients; on the October DST day the
-01:00-02:00 values hold two hours of consumption.
+The hourly client table comes from `src.data.uci` (raw file quirks and cleaning are described there).
 
 Control series without changes: a real hourly series is decomposed with MSTL (periods 24 and 168). The
 weekly seasonal profile is averaged over the weeks, the trend is replaced by a constant level, the
@@ -14,103 +11,14 @@ magnitude are then injected into the control series.
 """
 from __future__ import annotations
 
-import calendar
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from statsmodels.tsa.seasonal import MSTL
 
+from src.data.uci import load_hourly, select_clients, source_series
 from src.recommendations.forecast import BASE_FEATURES, DAY, WEEK, calendar_from_index, feature_table
-
-
-RAW_FILE = Path("data/raw/LD2011_2014.txt")
-HOURLY_FILE = Path("data/processed/uci_hourly.parquet")
-
-
-def _last_sunday(year: int, month: int) -> pd.Timestamp:
-    last_day = calendar.monthrange(year, month)[1]
-    d = pd.Timestamp(year=year, month=month, day=last_day)
-    return d - pd.Timedelta(days=(d.weekday() - 6) % 7)
-
-
-def load_raw(path: Path = RAW_FILE) -> pd.DataFrame:
-    df = pd.read_csv(path, sep=";", decimal=",", index_col=0, parse_dates=True)
-    df.index.name = "time"
-    # timestamps mark the end of the 15-minute interval; move to the start
-    df.index = df.index - pd.Timedelta(minutes=15)
-    df = df.astype("float32")
-    return df
-
-
-def fix_dst(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    years = sorted(set(df.index.year))
-    for y in years:
-        march = _last_sunday(y, 3)
-        hour = (df.index >= march + pd.Timedelta(hours=1)) & (df.index < march + pd.Timedelta(hours=2))
-        df.loc[hour] = np.nan
-        october = _last_sunday(y, 10)
-        hour = (df.index >= october + pd.Timedelta(hours=1)) & (df.index < october + pd.Timedelta(hours=2))
-        df.loc[hour] = df.loc[hour] / 2.0
-    return df
-
-
-def to_hourly(df: pd.DataFrame) -> pd.DataFrame:
-    hourly = df.resample("1h").mean()
-    hourly = hourly.interpolate(limit=3, limit_direction="both")
-    return hourly
-
-
-def prepare_hourly(raw: Path = RAW_FILE, out: Path = HOURLY_FILE) -> pd.DataFrame:
-    hourly = to_hourly(fix_dst(load_raw(raw)))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    hourly.to_parquet(out)
-    return hourly
-
-
-def load_hourly(path: Path = HOURLY_FILE) -> pd.DataFrame:
-    if not path.exists():
-        return prepare_hourly(out=path)
-    return pd.read_parquet(path)
-
-
-def select_clients(
-    hourly: pd.DataFrame,
-    n: int,
-    start_before: str = "2013-01-01",
-    check_window: tuple[str, str] = ("2013-01-01", "2013-12-31"),
-    max_zero_frac: float = 0.005,
-) -> list[str]:
-    """Clients that were already active before `start_before` and have almost
-    no zero readings inside `check_window`. Sorted by client id."""
-    chosen = []
-    win = hourly.loc[check_window[0] : check_window[1]]
-    for col in hourly.columns:
-        s = hourly[col]
-        nz = s[s > 0]
-        if nz.empty or nz.index[0] >= pd.Timestamp(start_before):
-            continue
-        w = win[col]
-        if (w <= 0).mean() > max_zero_frac or w.isna().any():
-            continue
-        chosen.append(col)
-        if len(chosen) == n:
-            break
-    return chosen
-
-
-# Autumn 2013: no Portuguese public holidays (Oct 5 and Nov 1 were suspended
-# in 2013-2015), 12 full weeks starting on a Monday.
-SOURCE_WINDOW = ("2013-09-02 00:00", "2013-11-24 23:00")
-
-
-def source_series(hourly: pd.DataFrame, client: str, window=SOURCE_WINDOW) -> pd.Series:
-    s = hourly.loc[window[0] : window[1], client].astype(float)
-    assert s.index[0].weekday() == 0, "source window must start on Monday"
-    assert len(s) % WEEK == 0, "source window must hold whole weeks"
-    return s
 
 
 @dataclass
@@ -211,6 +119,7 @@ def fit_models(n_clients: int = 20) -> list[SeasonalModel]:
 # ------------------------------------------------------------------ synthetic series (UCI clients)
 SCENARIOS = (("none", 0.0), ("level_shift", 2.0), ("trend_ramp", 2.0), ("variance", 2.0))
 SYN_WEEKS, SYN_DEPLOY_WEEK, SYN_CHANGE_WEEK = 24, 10, 13
+SYN_START = "2013-09-02 00:00"  # nominal calendar of the synthetic series: a Monday, the start of the source window
 
 
 def synthetic_series(models, seeds, scenarios=SCENARIOS) -> list[dict]:
@@ -224,5 +133,5 @@ def synthetic_series(models, seeds, scenarios=SCENARIOS) -> list[dict]:
                 y = control if kind == "none" else inject(control, m, Change(kind, mag, SYN_CHANGE_WEEK * WEEK), seed=seed)
                 out.append(dict(source="synthetic", series=f"{m.client}/s{seed}", client=m.client, seed=seed, scenario=kind,
                                 magnitude=mag, y=y, F=feature_table(y, hour, dow), t_deploy=SYN_DEPLOY_WEEK * WEEK,
-                                t_change=SYN_CHANGE_WEEK * WEEK, base_features=BASE_FEATURES))
+                                t_change=SYN_CHANGE_WEEK * WEEK, base_features=BASE_FEATURES, start=SYN_START))
     return out
