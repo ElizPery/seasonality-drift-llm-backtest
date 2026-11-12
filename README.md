@@ -222,7 +222,7 @@ LLM recommendations (`llm_client.py`): at a decision point the advisor gets diag
 it (weekly errors of the deployed model, bias, level, daily amplitude and noise changes, weeks since the last change)
 and answers with one catalog action and a short reason (Pydantic schema, validated by Instructor in JSON mode).
 Strategies `llm` (applied as proposed) and `llm_gate` (applied only if the acceptance rule confirms it); `rules` and
-`rules_gate` use fixed rules on the same diagnostics. Four prompt variants (`--prompt`): `base` (the system prompt
+`rules_gate` use fixed rules on the same diagnostics. Five prompt variants (`--prompt`): `base` (the system prompt
 with the catalog and the diagnostics), `instructions` (plus how to read the diagnostics and when each action fits),
 `examples` (plus four worked decisions from a synthetic series that is not evaluated) and `bare` (ablation: no
 diagnostics). Every LLM answer is stored in `data/llm_answers/` (kept in git), so a rerun reads the stored answers

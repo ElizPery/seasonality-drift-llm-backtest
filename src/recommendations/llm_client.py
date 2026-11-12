@@ -37,7 +37,7 @@ CACHE_DIR = Path("data/llm_answers")  # tracked by git: a rerun from the stored 
 # API keys are read from files, not from the shell environment: <provider>.env in this folder with one line
 # <PROVIDER>_API_KEY=..., e.g. openrouter.env with OPENROUTER_API_KEY=...
 KEY_DIR = Path(os.environ.get("LLM_KEY_DIR", "~/.config/diploma")).expanduser()
-PROMPTS = ("base", "instructions", "examples", "bare")
+PROMPTS = ("base", "instructions", "examples", "bare", "rich")
 
 
 class Recommendation(BaseModel):
@@ -53,9 +53,11 @@ class Recommendation(BaseModel):
 
 
 def diagnostics(y: np.ndarray, pred: np.ndarray, T: int, t_deploy: int, scale: float, last_change: int,
-                alarm: dict | None = None) -> dict:
+                alarm: dict | None = None, history: list | None = None, kind: str | None = None) -> dict:
     """Numbers the advisor sees at the decision origin T. Only data before T is used; errors are those of
-    the forecasts the deployed strategy actually made (`pred`). Values are in MASE scale units."""
+    the forecasts the deployed strategy actually made (`pred`). Values are in MASE scale units. The fields
+    after `alarm` feed the "rich" prompt only: `history` lists the decisions taken so far as (origin, action),
+    `kind` says what the series measures (no date, no place: nothing the model could recognise)."""
     last = np.arange(T - WEEK, T)
     before = np.arange(T - 5 * WEEK, T - WEEK)  # the 4 weeks before the last one
     first = np.arange(t_deploy, min(t_deploy + 2 * WEEK, T - WEEK))
@@ -80,6 +82,28 @@ def diagnostics(y: np.ndarray, pred: np.ndarray, T: int, t_deploy: int, scale: f
         weeks_since_change=round((T - last_change) / WEEK, 1),
         weeks_of_history=round(T / WEEK, 1),
         alarm=alarm,
+        **_rich_fields(y, pred, T, t_deploy, scale, mase, history, kind),
+    )
+
+
+def _rich_fields(y, pred, T, t_deploy, scale, mase, history, kind) -> dict:
+    """Extra fields of the "rich" prompt: the error and bias of each of the last 14 days, the last 48 hours
+    of actual values against the forecast (series units, 3 significant digits), and the previous decision
+    with the error of the week before and the week after it, once that week has passed."""
+    days = [o for o in range(T - 14 * DAY, T, DAY) if o >= t_deploy]
+    last = None
+    for t_dec, action in reversed(history or []):
+        if t_dec + WEEK <= T and t_dec - WEEK >= t_deploy:
+            last = dict(action=action, weeks_ago=round((T - t_dec) / WEEK, 1),
+                        mase_week_before=round(mase(np.arange(t_dec - WEEK, t_dec)), 2),
+                        mase_week_after=round(mase(np.arange(t_dec, t_dec + WEEK)), 2))
+            break
+    return dict(
+        daily_errors=[round(mase(np.arange(o, o + DAY)), 2) for o in days],
+        daily_bias=[round(float(np.mean(y[o:o + DAY] - pred[o:o + DAY])) / scale, 2) for o in days],
+        recent_hours=[[float(f"{a:.3g}"), float(f"{f:.3g}")] for a, f in zip(y[T - 2 * DAY:T], pred[T - 2 * DAY:T])],
+        last_decision=last,
+        kind=kind,
     )
 
 
@@ -108,6 +132,14 @@ Which action do you choose?"""
 USER_BARE = """{alarm_text}
 
 Which action do you choose?"""
+
+# "rich": the diagnostics of "base" plus what an analyst would also look at, all from data before the origin
+USER_RICH_EXTRA = """Additional context:
+- the series: {kind}
+- forecast error per day over the last {n_days} days, oldest first: {daily_errors}
+- bias per day over the same days (positive: actual above the forecast): {daily_bias}
+- the last 48 hours, actual / forecast, oldest first: {recent_hours}
+- previous decision: {last_decision}"""
 
 # "instructions" and "examples": how to read the diagnostics, appended to the system prompt. The thresholds are
 # those of `RuleAdvisor`; the instructions also say when each of the other catalog actions fits
@@ -166,6 +198,19 @@ def _user_full(ctx: dict) -> str:
     return USER_FULL.format(**ctx, alarm_text=_alarm_text(ctx), weeks_text=weeks_text)
 
 
+def _user_rich(ctx: dict) -> str:
+    head, question = _user_full(ctx).rsplit("\n\n", 1)
+    d = ctx.get("last_decision")
+    last = (f"{d['action']} {d['weeks_ago']} weeks ago; error in the week before it {d['mase_week_before']}, "
+            f"in the week after it {d['mase_week_after']}" if d else "none yet")
+    extra = USER_RICH_EXTRA.format(
+        kind=ctx.get("kind") or "an hourly series", n_days=len(ctx["daily_errors"]),
+        daily_errors=", ".join(str(v) for v in ctx["daily_errors"]),
+        daily_bias=", ".join(f"{v:+}" for v in ctx["daily_bias"]),
+        recent_hours=", ".join(f"{a:g}/{f:g}" for a, f in ctx["recent_hours"]), last_decision=last)
+    return f"{head}\n\n{extra}\n\n{question}"
+
+
 def render_examples() -> str:
     parts = ["Examples of decisions on other series:"]
     for i, (ctx, action, reason) in enumerate(EXAMPLES, 1):
@@ -177,7 +222,8 @@ def render_examples() -> str:
 
 def render_prompt(ctx: dict, prompt: str = "base") -> tuple[str, str]:
     """System and user messages of a prompt variant (see `PROMPTS`). "bare" (ablation): the advisor only knows
-    that a review is due; "instructions" and "examples" extend the system prompt of "base"."""
+    that a review is due; "instructions" and "examples" extend the system prompt of "base"; "rich" extends the
+    user message of "base" with daily errors, the last 48 hours and the previous decision."""
     if prompt not in PROMPTS:
         raise ValueError(f"unknown prompt variant {prompt!r}, expected one of {PROMPTS}")
     catalog = "\n".join(f'- {a.name}: {a.title} ({"retrains the model" if a.kind == "retrain" else "no retraining"})'
@@ -190,6 +236,8 @@ def render_prompt(ctx: dict, prompt: str = "base") -> tuple[str, str]:
     if prompt == "bare":
         alarm_text = _alarm_text(ctx)
         return system, USER_BARE.format(alarm_text=alarm_text[0].upper() + alarm_text[1:])
+    if prompt == "rich":
+        return system, _user_rich(ctx)
     return system, _user_full(ctx)
 
 
