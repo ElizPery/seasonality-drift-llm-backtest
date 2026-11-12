@@ -214,7 +214,7 @@ class LLMAdvisor:
     answer is missing from the cache, so a rerun from stored answers needs no API key."""
 
     def __init__(self, model: str = DEFAULT_MODEL, cache_dir: Path = CACHE_DIR, mode=None, max_retries: int = 2,
-                 max_tokens: int = 2048, effort: str | None = "low", client=None, prompt: str = "base"):
+                 max_tokens: int = 2048, effort: str | None = "low", client=None, prompt: str = "base", timeout: float = 120.0):
         # rows of a prompt variant other than "base" carry the model name with the suffix "|<variant>", so all
         # variants can live in one results file
         if prompt not in PROMPTS:
@@ -222,6 +222,7 @@ class LLMAdvisor:
         self.prompt = prompt
         self.name = model if prompt == "base" else f"{model}|{prompt}"
         self.model, self.mode, self.max_retries, self.max_tokens, self.effort = model, mode, max_retries, max_tokens, effort
+        self.timeout = timeout  # seconds per request: a hung connection must not stall a worker process
         self.cache_dir = Path(cache_dir)
         self._client = client
         self.calls = 0  # answers requested from the API in this process (not read from the cache)
@@ -259,7 +260,7 @@ class LLMAdvisor:
             extra = {"extra_body": {"reasoning": {"effort": self.effort}}}
         rec, completion = self._get_client().create_with_completion(
             response_model=Recommendation, messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_retries=self.max_retries, max_tokens=self.max_tokens, **extra)
+            max_retries=self.max_retries, max_tokens=self.max_tokens, timeout=self.timeout, **extra)
         self.calls += 1
         usage = getattr(completion, "usage", None)
         # Anthropic reports input/output tokens, OpenAI-compatible providers (OpenRouter, Ollama) prompt/completion
