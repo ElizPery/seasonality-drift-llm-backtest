@@ -295,7 +295,10 @@ class LLMAdvisor:
                       user=user, answer=rec.model_dump(), time=time.strftime("%Y-%m-%dT%H:%M:%S"),
                       input_tokens=tokens_in, output_tokens=tokens_out, error=error if usage is None else None, effort=self.effort)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.cache_dir / f"answers_{os.getpid()}.jsonl", "a") as f:  # one file per process: no write races
+        # a failed request is logged but not cached, so a rerun asks the model again instead of keeping the fallback
+        name = f"answers_{os.getpid()}.jsonl" if usage is not None else f"errors_{os.getpid()}.jsonl"
+        with open(self.cache_dir / name, "a") as f:  # one file per process: no write races
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._cache[key] = record
+        if usage is not None:
+            self._cache[key] = record
         return rec
