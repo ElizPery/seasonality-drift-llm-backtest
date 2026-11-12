@@ -28,6 +28,7 @@ from src.recommendations.backtester import (ADVISED_STRATEGIES, ALARM_STRATEGIES
                                             run_backtests, sort_runs, summarize, tune_base_model)
 from src.recommendations.data_sources import entsoe_series, seismic_series
 from src.recommendations.forecast import LGBM_PARAMS, WEEK, mase_scale
+from src.recommendations.llm_client import PROMPTS
 from src.recommendations.plots import example_frame
 from src.recommendations.strata import strata_table
 from src.recommendations.synthetic import SYN_DEPLOY_WEEK, fit_models, synthetic_series
@@ -94,10 +95,12 @@ def main():
     p.add_argument("--report", action="store_true", help="rebuild the summaries from runs.csv without recomputing")
     p.add_argument("--advisors", default=None,
                    help="comma-separated advisors (rules, llm): compute only their strategies and replace their rows in runs.csv")
-    p.add_argument("--llm-model", default=None, help='Instructor model string, e.g. "anthropic/claude-haiku-5-5"')
+    p.add_argument("--llm-model", default=None,
+                   help='Instructor model string, provider first, e.g. "openrouter/mistralai/mistral-small" or "ollama/qwen2.5:7b-instruct"')
     p.add_argument("--repeats", type=int, default=1, help="how many times the advised strategies run (column repeat)")
-    p.add_argument("--no-diagnostics", action="store_true",
-                   help="ablation: the LLM advisor sees no diagnostics, only that a review is due (model name gets |bare)")
+    p.add_argument("--prompt", default="base", choices=PROMPTS,
+                   help="prompt variant of the LLM advisor: the system prompt alone, with instructions, with instructions and "
+                        "examples, or bare (ablation: no diagnostics); the model name gets |<variant> unless base")
     p.add_argument("--alerts", default=None,
                    help="alerts CSV (see alarms.py): compute only the strategies that review on alarms, once per detector in the "
                         "file (the advised ones for the advisors given), and replace their rows in runs.csv")
@@ -150,7 +153,7 @@ def main():
                 alerts = None
                 strategies = (STRATEGIES[0],) + tuple(st for st in ADVISED_STRATEGIES if st.advisor in advisors)
             new = run_backtests(series, args.processes, log=sys.stderr, strategies=strategies, advisors=advisors,
-                                llm_model=args.llm_model, alerts=alerts, repeats=args.repeats, no_diagnostics=args.no_diagnostics)
+                                llm_model=args.llm_model, alerts=alerts, repeats=args.repeats, prompt=args.prompt)
             new = new[new.strategy.isin([st.name for st in strategies[1:]])]
             prev = pd.read_csv(out / "runs.csv", float_precision="round_trip")
             for c in ("detector", "model", "repeat"):

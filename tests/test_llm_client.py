@@ -10,7 +10,8 @@ from pydantic import ValidationError
 from src.recommendations.backtester import ADVISED_STRATEGIES, STRATEGIES, backtest
 from src.recommendations.catalog import CATALOG
 from src.recommendations.forecast import BASE_FEATURES, WEEK
-from src.recommendations.llm_client import LLMAdvisor, Recommendation, RuleAdvisor, diagnostics, render_prompt
+from src.recommendations.llm_client import (EXAMPLES, PROMPTS, LLMAdvisor, Recommendation, RuleAdvisor, diagnostics,
+                                            render_prompt)
 from tests.test_backtester import T_DEPLOY, toy
 
 
@@ -30,7 +31,7 @@ class Fixed:
     def __init__(self, action):
         self.action = action
 
-    def recommend(self, ctx, repeat=0, with_diagnostics=True):
+    def recommend(self, ctx, repeat=0):
         return Recommendation(action=self.action, reason="fixed")
 
 
@@ -52,8 +53,37 @@ def test_prompt_lists_the_catalog_and_the_bare_prompt_has_no_numbers():
     system, user = render_prompt(ctx)
     assert all(f"- {a.name}:" in system for a in CATALOG)
     assert str(ctx["mase_first_weeks"]) in user
-    _, bare = render_prompt(ctx, with_diagnostics=False)
+    _, bare = render_prompt(ctx, "bare")
     assert not any(ch.isdigit() for ch in bare)
+
+
+def test_prompt_variants_extend_the_base_system_prompt():
+    y, _ = toy()
+    ctx = diagnostics(y, y + 1.0, T_DEPLOY + 3 * WEEK, T_DEPLOY, 5.0, T_DEPLOY)
+    msgs = {v: render_prompt(ctx, v) for v in PROMPTS}
+    base_system, base_user = msgs["base"]
+    assert msgs["instructions"][1] == msgs["examples"][1] == base_user
+    assert msgs["instructions"][0].startswith(base_system) and msgs["examples"][0].startswith(msgs["instructions"][0])
+    assert "Example" not in msgs["instructions"][0] and f"Example {len(EXAMPLES)}." in msgs["examples"][0]
+    assert {a for _, a, _ in EXAMPLES} <= {a.name for a in CATALOG}
+    with pytest.raises(ValueError):
+        render_prompt(ctx, "few-shot")
+
+
+def test_the_base_prompt_still_matches_the_stored_pilot_answers():
+    # the pilot answers were cached before the prompt variants existed: "base" must render the same messages
+    import json
+    from pathlib import Path
+
+    from src.recommendations.llm_client import CACHE_DIR, cache_key
+
+    records = [json.loads(line) for f in sorted(Path(CACHE_DIR).glob("answers_*.jsonl")) for line in f.read_text().splitlines()]
+    pilot = [r for r in records if r["model"] == "ollama/qwen2.5:7b-instruct" and r["with_diagnostics"]]
+    if not pilot:
+        pytest.skip("no stored pilot answers")
+    y, _ = toy()
+    system, _ = render_prompt(diagnostics(y, y + 1.0, T_DEPLOY + 3 * WEEK, T_DEPLOY, 5.0, T_DEPLOY))  # does not depend on the series
+    assert all(cache_key(r["model"], system, r["user"], r["repeat"]) == r["key"] for r in pilot)
 
 
 def test_answer_schema_accepts_catalog_actions_only():
@@ -97,14 +127,18 @@ def test_bare_advisor_gets_a_tagged_name_and_a_prompt_without_numbers(tmp_path):
     y, _ = toy()
     ctx = diagnostics(y, y + 1.0, T_DEPLOY + 3 * WEEK, T_DEPLOY, 5.0, T_DEPLOY)
     stub = StubClient("keep")
-    bare = LLMAdvisor("ollama/test-model", cache_dir=tmp_path, client=stub, with_diagnostics=False)
+    bare = LLMAdvisor("ollama/test-model", cache_dir=tmp_path, client=stub, prompt="bare")
     assert bare.name == "ollama/test-model|bare"
     bare.recommend(ctx)
     record = next(iter(bare._cache.values()))
-    assert record["with_diagnostics"] is False and "MASE" not in record["user"]
+    assert record["with_diagnostics"] is False and record["prompt"] == "bare" and "MASE" not in record["user"]
     full = LLMAdvisor("ollama/test-model", cache_dir=tmp_path, client=stub)
     full.recommend(ctx)
     assert stub.calls == 2  # the bare and the full prompt are different cache keys
+    examples = LLMAdvisor("ollama/test-model", cache_dir=tmp_path, client=stub, prompt="examples")
+    assert examples.name == "ollama/test-model|examples"
+    examples.recommend(ctx)
+    assert stub.calls == 3  # same user message, another system prompt: a new request
 
 
 def test_job_repeats_the_advised_strategies_and_tags_the_model():

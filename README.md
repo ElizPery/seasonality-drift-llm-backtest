@@ -222,9 +222,13 @@ LLM recommendations (`llm_client.py`): at a decision point the advisor gets diag
 it (weekly errors of the deployed model, bias, level, daily amplitude and noise changes, weeks since the last change)
 and answers with one catalog action and a short reason (Pydantic schema, validated by Instructor in JSON mode).
 Strategies `llm` (applied as proposed) and `llm_gate` (applied only if the acceptance rule confirms it); `rules` and
-`rules_gate` use fixed rules on the same diagnostics. Every LLM answer is stored in
-`data/llm_answers/` (kept in git), so a rerun reads the stored answers and needs no API key. The key is read from
-`~/.config/diploma/anthropic.env` (one line `ANTHROPIC_API_KEY=...`, another path can be set in `LLM_KEY_FILE`).
+`rules_gate` use fixed rules on the same diagnostics. Four prompt variants (`--prompt`): `base` (the system prompt
+with the catalog and the diagnostics), `instructions` (plus how to read the diagnostics and when each action fits),
+`examples` (plus four worked decisions from a synthetic series that is not evaluated) and `bare` (ablation: no
+diagnostics). Every LLM answer is stored in `data/llm_answers/` (kept in git), so a rerun reads the stored answers
+and needs no API key. The model string names the provider first (`openrouter/...`, `anthropic/...`, `ollama/...`);
+the key is read from `~/.config/diploma/<provider>.env`, one line `<PROVIDER>_API_KEY=...` (another folder can be
+set in `LLM_KEY_DIR`).
 
 Decisions on detector alarms (`alarms.py`, the link with stream A): the strategies `alarm_retrain`, `alarm_gate`,
 `alarm_catalog_gate`, `alarm_oracle`, `alarm_rules`, `alarm_rules_gate`, `alarm_llm` and `alarm_llm_gate` take the
@@ -255,6 +259,8 @@ python -m src.recommendations.run_backtest --tune            # base model valida
 python -m src.recommendations.run_backtest                   # all sources, about 40 minutes on 16 cores
 python -m src.recommendations.run_backtest --sources seismic # recompute one source, keep the other rows
 python -m src.recommendations.run_backtest --advisors rules  # add the advised strategies (rules, llm) to runs.csv
+python -m src.recommendations.run_backtest --advisors llm --llm-model ollama/qwen2.5:7b-instruct --prompt examples --repeats 3
+                                                             # LLM strategies with one model and one prompt variant
 python -m src.recommendations.alarms                         # stand-in detectors: calibrate, write data/alerts/alerts.csv
 python -m src.recommendations.run_backtest --alerts data/alerts/alerts.csv --advisors rules
                                                              # add the strategies that review on alarms, per detector
