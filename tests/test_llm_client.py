@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from src.recommendations.backtester import ADVISED_STRATEGIES, STRATEGIES, backtest
 from src.recommendations.catalog import CATALOG
-from src.recommendations.forecast import BASE_FEATURES, WEEK
+from src.recommendations.forecast import BASE_FEATURES, DAY, WEEK
 from src.recommendations.llm_client import (EXAMPLES, PROMPTS, LLMAdvisor, Recommendation, RuleAdvisor, diagnostics,
                                             render_prompt)
 from tests.test_backtester import T_DEPLOY, toy
