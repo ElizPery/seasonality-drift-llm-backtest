@@ -264,6 +264,9 @@ python -m src.recommendations.run_backtest --advisors llm --llm-model ollama/qwe
 python -m src.recommendations.alarms                         # stand-in detectors: calibrate, write data/alerts/alerts.csv
 python -m src.recommendations.run_backtest --alerts data/alerts/alerts.csv --advisors rules
                                                              # add the strategies that review on alarms, per detector
+python -m src.recommendations.llm_report                     # LLM advisors on the real series: paired tests against the
+                                                             # reference strategies, shares of the chosen actions and the
+                                                             # figure of error against retrainings (docs/images)
 python -m pytest tests                                       # tests
 ```
 
