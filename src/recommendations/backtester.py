@@ -141,7 +141,8 @@ def check_action(a, model: Model, y: np.ndarray, F: dict[str, np.ndarray], pred:
 
 def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: Strategy, base_features: tuple[str, ...],
              params: dict | None = None, catalog=CATALOG, cache: dict | None = None, prune_cache: bool = False,
-             advisors: dict | None = None, repeat: int = 0, alarms=None, detector: str | None = None) -> dict:
+             advisors: dict | None = None, repeat: int = 0, alarms=None, detector: str | None = None,
+             kind: str | None = None) -> dict:
     """Rolling day-ahead forecasts from `t_deploy` to the end of the series under one strategy.
 
     Retraining fits are shared through `cache` between strategies of the same series (see `make_actor`).
@@ -153,7 +154,8 @@ def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: S
     `trigger="alarm"` reviews the model at the first origin after an alarm (alarms before the origin are
     known, the origin itself is not), then ignores alarms for `cooldown_days`; alarms before deployment are
     ignored. Counters: `decisions` (review points), `proposed` (proposals of a change), `accepted` (changes
-    applied), `applied` (origins at which the model was changed), `alarms` (alarms after deployment)."""
+    applied), `applied` (origins at which the model was changed), `alarms` (alarms after deployment). `kind`
+    (what the series measures) and the decisions taken so far reach the advisor through the diagnostics."""
     n = len(y)
     origins = list(range(t_deploy, n - DAY + 1, DAY))
     end = origins[-1] + DAY
@@ -164,7 +166,7 @@ def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: S
 
     model, _ = act(ACTIONS["retrain_full"], Model(base_features), t_deploy)
     pred = np.full(n, np.nan)
-    retrains, picks, applied = 0, [], []
+    retrains, picks, applied, history = 0, [], [], []
     decisions = proposed = accepted = check_fits = 0
     last_change = t_deploy
     seen = int(np.searchsorted(alarms, t_deploy))  # alarms consumed or ignored so far
@@ -204,7 +206,7 @@ def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: S
                     picks.append(best if ok else "keep")
             elif strategy.policy == "advised":
                 if T - VAL_WEEKS * WEEK >= t_deploy:
-                    ctx = diagnostics(y, pred, T, t_deploy, scale, last_change, alarm=alarm)
+                    ctx = diagnostics(y, pred, T, t_deploy, scale, last_change, alarm=alarm, history=history, kind=kind)
                     a = ACTIONS[advisors[strategy.advisor].recommend(ctx, repeat).action]
                     decisions += 1
                     ok = a.kind != "none"
@@ -221,6 +223,7 @@ def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: S
                         last_change = T
                         changed = True
                     picks.append(a.name if ok else "keep")
+                    history.append((T, a.name if ok else "keep"))
             else:  # hindsight oracle: best action on the next decision window
                 rows = np.arange(T, min(T + strategy.cadence_days * DAY, end))
                 best = None
@@ -279,12 +282,14 @@ def evaluate_series(s: dict, params: dict | None = None, strategies=STRATEGIES, 
     model change after it)."""
     y, F, t_dep, t_chg = s["y"], s["F"], s["t_deploy"], s["t_change"]
     scale = mase_scale(y[:t_dep])
+    kind = KINDS.get(s["source"])
     cache: dict = {}
     jobs = [(st, d) for st in strategies for d in ([None] if st.trigger == "calendar" else sorted(alerts or {}))]
     runs = {}
     for i, (st, d) in enumerate(jobs):
         runs[(st.name, d)] = backtest(y, F, t_dep, st, s["base_features"], params, cache=cache, prune_cache=(i == len(jobs) - 1),
-                                      advisors=advisors, repeat=repeat, alarms=None if d is None else alerts[d], detector=d)
+                                      advisors=advisors, repeat=repeat, alarms=None if d is None else alerts[d], detector=d,
+                                      kind=kind)
     cache.clear()
     end = runs[("nothing", None)]["end"]
     naive = np.full(len(y), np.nan)
@@ -315,6 +320,11 @@ def evaluate_series(s: dict, params: dict | None = None, strategies=STRATEGIES, 
         rows.append(row)
     return rows
 
+
+# what the series of each source measures, for the "rich" prompt: no date, no place, no name of the series
+KINDS = {"entsoe": "hourly electricity load of a national grid, in MW",
+         "seismic": "hourly seismic noise level (ground displacement) at one seismic station",
+         "synthetic": "hourly electricity consumption of one client, in kW"}
 
 _WORKER: dict = {}  # advisors of a worker process, created on its first series
 

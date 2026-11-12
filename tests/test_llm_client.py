@@ -70,6 +70,23 @@ def test_prompt_variants_extend_the_base_system_prompt():
         render_prompt(ctx, "few-shot")
 
 
+def test_rich_prompt_adds_daily_errors_and_the_previous_decision():
+    y, _ = toy()
+    T = T_DEPLOY + 3 * WEEK
+    ctx = diagnostics(y, y + 1.0, T, T_DEPLOY, 5.0, T_DEPLOY, history=[(T - 2 * WEEK, "retrain_2w")], kind="a toy series")
+    assert len(ctx["daily_errors"]) == len(ctx["daily_bias"]) == 14 and len(ctx["recent_hours"]) == 48
+    assert ctx["last_decision"]["action"] == "retrain_2w" and ctx["last_decision"]["weeks_ago"] == 2.0
+    assert ctx["last_decision"]["mase_week_before"] == ctx["last_decision"]["mase_week_after"] == 0.2
+    _, user = render_prompt(ctx, "rich")
+    base_user = render_prompt(ctx)[1]
+    assert user.startswith(base_user.rsplit("\n\n", 1)[0]) and user.endswith("Which action do you choose?")
+    assert "a toy series" in user and "retrain_2w 2.0 weeks ago" in user and "/" in user
+    # a decision too recent to be judged, or none at all, is reported as "none yet"
+    ctx2 = diagnostics(y, y + 1.0, T, T_DEPLOY, 5.0, T_DEPLOY, history=[(T - DAY, "keep")])
+    assert ctx2["last_decision"] is None and "none yet" in render_prompt(ctx2, "rich")[1]
+    assert render_prompt(ctx2)[1] == render_prompt(diagnostics(y, y + 1.0, T, T_DEPLOY, 5.0, T_DEPLOY))[1]
+
+
 def test_the_base_prompt_still_matches_the_stored_pilot_answers():
     # the pilot answers were cached before the prompt variants existed: "base" must render the same messages
     import json
