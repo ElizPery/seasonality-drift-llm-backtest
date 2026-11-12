@@ -223,6 +223,8 @@ class LLMAdvisor:
 
     def __init__(self, model: str = DEFAULT_MODEL, cache_dir: Path = CACHE_DIR, mode=None, max_retries: int = 2,
                  max_tokens: int = 2048, effort: str | None = "low", client=None, prompt: str = "base", timeout: float = 120.0):
+        # `effort`: reasoning effort of models that reason before answering ("low" by default); "off" switches reasoning
+        # off where the provider allows it (OpenRouter), so that sizes of one model family are compared without it
         # rows of a prompt variant other than "base" carry the model name with the suffix "|<variant>", so all
         # variants can live in one results file
         if prompt not in PROMPTS:
@@ -265,6 +267,8 @@ class LLMAdvisor:
         extra = {}
         if self.effort and self.model.startswith("anthropic/"):
             extra = {"extra_body": {"output_config": {"effort": self.effort}}}
+        elif self.effort == "off" and self.model.startswith("openrouter/"):
+            extra = {"extra_body": {"reasoning": {"enabled": False}}}
         elif self.effort and self.model.startswith("openrouter/"):
             extra = {"extra_body": {"reasoning": {"effort": self.effort}}}
         error, usage = None, None
@@ -289,7 +293,7 @@ class LLMAdvisor:
         tokens_out = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None)
         record = dict(key=key, model=self.model, repeat=repeat, prompt=self.prompt, with_diagnostics=self.prompt != "bare",
                       user=user, answer=rec.model_dump(), time=time.strftime("%Y-%m-%dT%H:%M:%S"),
-                      input_tokens=tokens_in, output_tokens=tokens_out, error=error if usage is None else None)
+                      input_tokens=tokens_in, output_tokens=tokens_out, error=error if usage is None else None, effort=self.effort)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         with open(self.cache_dir / f"answers_{os.getpid()}.jsonl", "a") as f:  # one file per process: no write races
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
