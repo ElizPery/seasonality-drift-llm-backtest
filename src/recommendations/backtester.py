@@ -291,7 +291,7 @@ def evaluate_series(s: dict, params: dict | None = None, strategies=STRATEGIES, 
     naive[t_dep:end] = seasonal_naive(y, np.arange(t_dep, end))
     runs[("naive", None)] = dict(pred=naive, retrains=0, picks=[], end=end)
     gated = {st.name for st in strategies if st.policy in ("gated", "advised")}
-    # advised strategies record which advisor answered (`model`: the LLM model string, "|bare" for the ablation,
+    # advised strategies record which advisor answered (`model`: the LLM model string with "|<prompt variant>" unless "base",
     # or "rules") and the number of the repeated run, so runs of several models and repeats share one file
     advised = {st.name: advisors[st.advisor].name for st in strategies if st.policy == "advised"}
     labels = {k: v for k, v in s.items() if k not in ("y", "F", "base_features", "start")}
@@ -320,13 +320,13 @@ _WORKER: dict = {}  # advisors of a worker process, created on its first series
 
 
 def _job(s, strategies=STRATEGIES, advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None,
-         detectors: tuple[str, ...] = (), repeats: int = 1, no_diagnostics: bool = False):
-    if advisors and _WORKER.get("key") != (advisors, llm_model, no_diagnostics):
+         detectors: tuple[str, ...] = (), repeats: int = 1, prompt: str = "base"):
+    if advisors and _WORKER.get("key") != (advisors, llm_model, prompt):
         from src.recommendations.llm_client import DEFAULT_MODEL, LLMAdvisor, RuleAdvisor
 
-        made = {"rules": RuleAdvisor, "llm": lambda: LLMAdvisor(llm_model or DEFAULT_MODEL, with_diagnostics=not no_diagnostics)}
+        made = {"rules": RuleAdvisor, "llm": lambda: LLMAdvisor(llm_model or DEFAULT_MODEL, prompt=prompt)}
         _WORKER["advisors"] = {k: made[k]() for k in advisors}
-        _WORKER["key"] = (advisors, llm_model, no_diagnostics)
+        _WORKER["key"] = (advisors, llm_model, prompt)
     mine = None
     if alerts is not None:  # every detector runs on every series; one without alarms on this series gets an empty list
         mine = alerts.get(series_id(s), {})
@@ -349,13 +349,13 @@ def sort_runs(df: pd.DataFrame) -> pd.DataFrame:
 
 def run_backtests(series: list[dict], processes: int | None = None, log=None, strategies=STRATEGIES,
                   advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None,
-                  repeats: int = 1, no_diagnostics: bool = False) -> pd.DataFrame:
+                  repeats: int = 1, prompt: str = "base") -> pd.DataFrame:
     """`alerts`: alarm positions per series id and detector (see `alarms.read_alerts`) for the alarm strategies.
-    `repeats`: how many times the advised strategies run (column `repeat`); `no_diagnostics`: the LLM ablation."""
+    `repeats`: how many times the advised strategies run (column `repeat`); `prompt`: the prompt variant of the LLM advisor (see `llm_client.PROMPTS`)."""
     rows = []
     detectors = tuple(sorted({d for per in (alerts or {}).values() for d in per}))
     job = partial(_job, strategies=strategies, advisors=advisors, llm_model=llm_model, alerts=alerts, detectors=detectors,
-                  repeats=repeats, no_diagnostics=no_diagnostics)
+                  repeats=repeats, prompt=prompt)
     with Pool(processes) as pool:
         for i, rs in enumerate(pool.imap_unordered(job, series, chunksize=1), 1):
             rows.extend(rs)
