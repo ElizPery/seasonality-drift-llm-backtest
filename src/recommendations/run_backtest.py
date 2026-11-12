@@ -98,6 +98,8 @@ def main():
     p.add_argument("--llm-model", default=None,
                    help='Instructor model string, provider first, e.g. "openrouter/mistralai/mistral-small" or "ollama/qwen2.5:7b-instruct"')
     p.add_argument("--repeats", type=int, default=1, help="how many times the advised strategies run (column repeat)")
+    p.add_argument("--llm-reasoning", default="low", choices=["low", "off"],
+                   help='reasoning effort of the LLM advisor: "low" (default) or "off" (no reasoning, where the provider allows it)')
     p.add_argument("--prompt", default="base", choices=PROMPTS,
                    help="prompt variant of the LLM advisor: the system prompt alone, with instructions, with instructions and "
                         "examples, or bare (ablation: no diagnostics); the model name gets |<variant> unless base")
@@ -153,7 +155,7 @@ def main():
                 alerts = None
                 strategies = (STRATEGIES[0],) + tuple(st for st in ADVISED_STRATEGIES if st.advisor in advisors)
             new = run_backtests(series, args.processes, log=sys.stderr, strategies=strategies, advisors=advisors,
-                                llm_model=args.llm_model, alerts=alerts, repeats=args.repeats, prompt=args.prompt)
+                                llm_model=args.llm_model, alerts=alerts, repeats=args.repeats, prompt=args.prompt, effort=args.llm_reasoning)
             new = new[new.strategy.isin([st.name for st in strategies[1:]])]
             prev = pd.read_csv(out / "runs.csv", float_precision="round_trip")
             for c in ("detector", "model", "repeat"):
