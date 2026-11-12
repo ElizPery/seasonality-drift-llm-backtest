@@ -175,7 +175,7 @@ def main():
     summ = summarize(runs)
     summ.to_csv(out / "summary.csv", index=False)
     oracle_picks(runs).to_csv(out / "oracle_picks.csv", index=False)
-    write_examples(models, out, real, seismic, recompute=set() if args.report else todo)
+    write_examples(models, out, real, seismic, recompute=set() if (args.report or advisors or args.alerts) else todo)
     print(f"done in {time.time() - t:.0f} s -> {out}")
     print(summ.round(3).to_string(index=False))
 

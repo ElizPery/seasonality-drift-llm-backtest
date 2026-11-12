@@ -20,12 +20,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.recommendations.catalog import CATALOG
 from src.recommendations.forecast import DAY, WEEK
@@ -42,6 +43,13 @@ PROMPTS = ("base", "instructions", "examples", "bare")
 class Recommendation(BaseModel):
     action: Literal[ACTION_NAMES] = Field(description="name of exactly one action from the catalog")
     reason: str = Field(max_length=400, description="one or two sentences: which numbers led to this choice")
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _cut(cls, v):
+        # a reason longer than the limit is cut, not re-asked: some models write long reasons at every attempt,
+        # and the action, not the wording, is what the experiment evaluates
+        return v[:400] if isinstance(v, str) and len(v) > 400 else v
 
 
 def diagnostics(y: np.ndarray, pred: np.ndarray, T: int, t_deploy: int, scale: float, last_change: int,
@@ -226,6 +234,7 @@ class LLMAdvisor:
         self.cache_dir = Path(cache_dir)
         self._client = client
         self.calls = 0  # answers requested from the API in this process (not read from the cache)
+        self.errors = 0  # requests that failed after all retries (the model was kept, see `error` in the record)
         self._cache = {}
         for f in sorted(self.cache_dir.glob("answers_*.jsonl")):
             for line in f.read_text().splitlines():
@@ -258,17 +267,29 @@ class LLMAdvisor:
             extra = {"extra_body": {"output_config": {"effort": self.effort}}}
         elif self.effort and self.model.startswith("openrouter/"):
             extra = {"extra_body": {"reasoning": {"effort": self.effort}}}
-        rec, completion = self._get_client().create_with_completion(
-            response_model=Recommendation, messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_retries=self.max_retries, max_tokens=self.max_tokens, timeout=self.timeout, **extra)
+        error, usage = None, None
+        for attempt in range(3):  # transport or validation failures after the retries of Instructor: wait and ask again
+            try:
+                rec, completion = self._get_client().create_with_completion(
+                    response_model=Recommendation, messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    max_retries=self.max_retries, max_tokens=self.max_tokens, timeout=self.timeout, **extra)
+                usage = getattr(completion, "usage", None)
+                break
+            except Exception as e:  # noqa: BLE001 - the run must not die on one request; the failure is recorded
+                error = f"{type(e).__name__}: {str(e)[:300]}"
+                print(f"advisor {self.model}: attempt {attempt + 1} failed: {error}", file=sys.stderr, flush=True)
+                time.sleep(5 * 3**attempt)
+        else:
+            # the advisor is unavailable at this review: keep the model, and the record says so (`error`)
+            rec = Recommendation(action="keep", reason=f"advisor unavailable: {error}"[:400])
+            self.errors += 1
         self.calls += 1
-        usage = getattr(completion, "usage", None)
         # Anthropic reports input/output tokens, OpenAI-compatible providers (OpenRouter, Ollama) prompt/completion
         tokens_in = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None)
         tokens_out = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None)
         record = dict(key=key, model=self.model, repeat=repeat, prompt=self.prompt, with_diagnostics=self.prompt != "bare",
                       user=user, answer=rec.model_dump(), time=time.strftime("%Y-%m-%dT%H:%M:%S"),
-                      input_tokens=tokens_in, output_tokens=tokens_out)
+                      input_tokens=tokens_in, output_tokens=tokens_out, error=error if usage is None else None)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         with open(self.cache_dir / f"answers_{os.getpid()}.jsonl", "a") as f:  # one file per process: no write races
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
