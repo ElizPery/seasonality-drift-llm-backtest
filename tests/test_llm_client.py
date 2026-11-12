@@ -78,7 +78,7 @@ def test_the_base_prompt_still_matches_the_stored_pilot_answers():
     from src.recommendations.llm_client import CACHE_DIR, cache_key
 
     records = [json.loads(line) for f in sorted(Path(CACHE_DIR).glob("answers_*.jsonl")) for line in f.read_text().splitlines()]
-    pilot = [r for r in records if r["model"] == "ollama/qwen2.5:7b-instruct" and r["with_diagnostics"]]
+    pilot = [r for r in records if r["model"] == "ollama/qwen2.5:7b-instruct" and r.get("prompt", "base") == "base"]
     if not pilot:
         pytest.skip("no stored pilot answers")
     y, _ = toy()
