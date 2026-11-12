@@ -251,7 +251,12 @@ class LLMAdvisor:
         key = cache_key(self.model, system, user, repeat)
         if key in self._cache:
             return Recommendation.model_validate(self._cache[key]["answer"])
-        extra = {"extra_body": {"output_config": {"effort": self.effort}}} if self.effort and self.model.startswith("anthropic/") else {}
+        # low reasoning effort: the Anthropic API takes output_config, OpenRouter a reasoning block (ignored by models without reasoning)
+        extra = {}
+        if self.effort and self.model.startswith("anthropic/"):
+            extra = {"extra_body": {"output_config": {"effort": self.effort}}}
+        elif self.effort and self.model.startswith("openrouter/"):
+            extra = {"extra_body": {"reasoning": {"effort": self.effort}}}
         rec, completion = self._get_client().create_with_completion(
             response_model=Recommendation, messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             max_retries=self.max_retries, max_tokens=self.max_tokens, **extra)
