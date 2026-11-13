@@ -10,7 +10,7 @@ on a series is the mean over its repeats, so every series counts once. The tests
 comparison of the strategies: the paired Wilcoxon signed-rank test on the differences per series, zero
 differences split between the signs, and the Holm correction over the configurations of one family.
 
-Outputs: data/processed/stream_b/recalibrate_weekly.csv, llm_paired_tests.csv, llm_action_shares.csv and
+Outputs: data/processed/stream_b/recalibrate_weekly.csv, llm_paired_tests.csv, llm_synthetic_tests.csv, llm_action_shares.csv and
 docs/images/quality_cost_real_series.png.
 """
 from __future__ import annotations
@@ -38,22 +38,56 @@ MODEL = {"anthropic/claude-sonnet-5.5": "Claude Sonnet 5.5", "anthropic/claude-h
          "qwen/qwen3-14b": "Qwen3 14B"}
 
 
-def recalibrate_weekly() -> pd.DataFrame:
-    """Fixed reference without a language model: correct the level every week, never retrain."""
+def recalibrate_weekly(synthetic: bool = True) -> pd.DataFrame:
+    """Fixed reference without a language model: correct the level every week, never retrain. One row per series
+    (the real ones and, with `synthetic`, the synthetic benchmark of `run_backtest`)."""
     from src.data.entsoe import ENTSOE_FILE
     from src.recommendations.backtester import Strategy, backtest, mase
     from src.recommendations.data_sources import entsoe_series, seismic_series
     from src.recommendations.forecast import mase_scale
     from src.recommendations.run_backtest import SEISMIC_DIR
+    from src.recommendations.synthetic import fit_models, synthetic_series
 
     st = Strategy(RECALIBRATE, "recalibrate the level every week", 7, "fixed", "recalibrate_level")
+    series = entsoe_series(str(ENTSOE_FILE)) + seismic_series(str(SEISMIC_DIR))
+    if synthetic:
+        series += synthetic_series(fit_models(20), list(range(3)))
     rows = []
-    for s in entsoe_series(str(ENTSOE_FILE)) + seismic_series(str(SEISMIC_DIR)):
+    for s in series:
         y, t_dep, t_chg = s["y"], s["t_deploy"], s["t_change"]
         scale = mase_scale(y[:t_dep])
         r = backtest(y, s["F"], t_dep, st, s["base_features"])
-        rows.append(dict(source=s["source"], series=s["series"], strategy=st.name, mase_post=mase(y, r["pred"], t_chg, r["end"], scale),
-                         mase_pre=mase(y, r["pred"], t_dep, t_chg, scale), retrains=r["retrains"]))
+        rows.append(dict(source=s["source"], series=s["series"], scenario=s["scenario"], strategy=st.name,
+                         mase_post=mase(y, r["pred"], t_chg, r["end"], scale) if t_chg else np.nan,
+                         mase_pre=mase(y, r["pred"], t_dep, t_chg, scale) if t_chg and t_chg > t_dep else np.nan, retrains=r["retrains"]))
+    return pd.DataFrame(rows)
+
+
+SCENARIOS = ("level_shift", "trend_ramp", "variance", "none")
+
+
+def synthetic_tests(runs: pd.DataFrame, recal: pd.DataFrame) -> pd.DataFrame:
+    """The advisors that were run on the synthetic benchmark, per scenario: mean MASE after the change, mean
+    retrainings, and the paired test of every advisor against doing nothing, the weekly recalibration, the checked
+    schedule and the weekly schedule (Holm over the four scenarios of one pair)."""
+    s = runs[(runs.source == "synthetic") & runs.detector.isna()].copy()
+    s["name"] = s.strategy.where(s.model.isna(), s.strategy + "|" + s.model.fillna("").str.replace("openrouter/", ""))
+    r = recal[recal.source == "synthetic"].assign(name=RECALIBRATE)
+    s = pd.concat([s[["series", "scenario", "name", "mase_post", "retrains"]], r[["series", "scenario", "name", "mase_post", "retrains"]]])
+    error = s.pivot_table(index=["series", "scenario"], columns="name", values="mase_post", aggfunc="mean")
+    cost = s.pivot_table(index=["series", "scenario"], columns="name", values="retrains", aggfunc="mean")
+    rows = []
+    for a in [c for c in error.columns if "|" in c]:
+        for b in ("nothing", RECALIBRATE, "scheduled_gate", "scheduled"):
+            block = []
+            for sc in SCENARIOS:
+                t = error.xs(sc, level="scenario")[[a, b]].dropna()
+                w = wilcoxon_pairs(t, [(a, b)]).iloc[0]
+                block.append(dict(a=a, b=b, scenario=sc, n=int(w.n), mean_a=w.mean_a, mean_b=w.mean_b, retrains_a=cost.xs(sc, level="scenario")[a].mean(),
+                                  retrains_b=cost.xs(sc, level="scenario")[b].mean(), median_diff=w.median_diff, wins=int(w.wins), ties=int(w.ties),
+                                  losses=int(w.losses), p=w.p))
+            for row, adj in zip(block, holm([x["p"] for x in block])):
+                rows.append(dict(row, p_holm=adj))
     return pd.DataFrame(rows)
 
 
@@ -67,7 +101,7 @@ def configurations(runs: pd.DataFrame, recal: pd.DataFrame | None = None, metric
     df = df[~df.name.str.contains(r"\|bare")]
     table = df.pivot_table(index=KEY, columns="name", values=metric, aggfunc="mean")
     if recal is not None:
-        table = table.join(recal.set_index(KEY)[metric].rename(RECALIBRATE))
+        table = table.join(recal[recal.source.isin(REAL)].set_index(KEY)[metric].rename(RECALIBRATE))
     return table
 
 
@@ -217,6 +251,10 @@ def main():
     tests.to_csv(out / "llm_paired_tests.csv", index=False)
     shares = action_shares()
     shares.to_csv(out / "llm_action_shares.csv", index=False)
+    if runs[(runs.source == "synthetic") & runs.model.notna()].shape[0]:
+        syn = synthetic_tests(runs, recal)
+        syn.to_csv(out / "llm_synthetic_tests.csv", index=False)
+        print(syn.round(4).to_string(index=False))
     fig = plot_quality_cost(runs, recal)
     Path(args.figure).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.figure, dpi=200, facecolor="white")
