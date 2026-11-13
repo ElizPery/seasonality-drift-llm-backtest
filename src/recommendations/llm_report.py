@@ -154,6 +154,20 @@ def paired_tests(table: pd.DataFrame) -> pd.DataFrame:
                                                "losses", "p", "p_holm"]]
 
 
+def joint_ranks(table: pd.DataFrame) -> tuple[pd.Series, float]:
+    """Average ranks on the real series of the 17 deployable strategies of the statistical comparison together with
+    the advisors with the base prompt, applied and checked (rank 1 = the lowest error), and the critical difference
+    of the Nemenyi test at alpha = 0.05 for that many strategies."""
+    strategies = ["nothing", "always", "scheduled", "scheduled_gate", "catalog_gate", "rules", "rules_gate"]
+    strategies += [c for c in table.columns if c.startswith("alarm_") and "|" not in c and "oracle" not in c]
+    f = families(table)
+    cols = strategies + [c for c in f["applied"] + f["checked"] if c.count("|") == 1]
+    ranks = table[cols].rank(axis=1).mean()
+    k, n = len(cols), len(table)
+    cd = stats.studentized_range.ppf(0.95, k, np.inf) / np.sqrt(2) * np.sqrt(k * (k + 1) / (6 * n))
+    return ranks.sort_values(), float(cd)
+
+
 def action_shares(cache_dir: Path = CACHE_DIR) -> pd.DataFrame:
     """Share of every catalog action among the stored answers of each hosted model and prompt variant."""
     counts: dict[tuple[str, str], Counter] = {}
@@ -261,6 +275,10 @@ def main():
     for name, g in tests.groupby("comparison", sort=False):
         print(f"{name}: {len(g)} pairs, wins of a {g.wins.min()}-{g.wins.max()} of {g.n.iloc[0]}, p {g.p.min():.2g}-{g.p.max():.2g}, "
               f"Holm {g.p_holm.min():.2g}-{g.p_holm.max():.2g}, significant after Holm {(g.p_holm < 0.05).sum()}")
+    ranks, cd = joint_ranks(table)
+    advisors = ranks[ranks.index.str.contains("|", regex=False)]
+    print(f"joint ranking of {len(ranks)} strategies on {len(table)} series, CD {cd:.2f}: advisors {advisors.min():.2f}-{advisors.max():.2f}, "
+          f"doing nothing {ranks['nothing']:.2f}, weekly schedule {ranks['scheduled']:.2f}, daily retraining {ranks['always']:.2f}")
     medians = table.groupby(level="source").median().T.round(3)
     print(medians.loc[[c for c in ("nothing", RECALIBRATE, "scheduled_gate", "catalog_gate", "scheduled", "always") if c in medians.index]].to_string())
     print(shares.tail(1).round(3).to_string(index=False))
