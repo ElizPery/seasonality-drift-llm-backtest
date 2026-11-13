@@ -267,6 +267,8 @@ python -m src.recommendations.run_backtest --alerts data/alerts/alerts.csv --adv
 python -m src.recommendations.llm_report                     # LLM advisors on the real series: paired tests against the
                                                              # reference strategies, shares of the chosen actions and the
                                                              # figure of error against retrainings (docs/images)
+python -m src.recommendations.prompt_probe                   # probe of the prompt wording: the same diagnostics with a system
+                                                             # message that states the goal and the costs (data/llm_probe)
 python -m pytest tests                                       # tests
 ```
 
