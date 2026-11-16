@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import calendar
 from pathlib import Path
+import random
 
 import numpy as np
 import pandas as pd
@@ -16,8 +17,8 @@ import pandas as pd
 from src.data.frames import frame_from_series
 
 
-RAW_FILE = Path("data/raw/LD2011_2014.txt")
-HOURLY_FILE = Path("data/processed/uci_hourly.parquet")
+RAW_FILE = Path("../data/raw/LD2011_2014.txt")
+HOURLY_FILE = Path("../data/processed/uci_hourly.parquet")
 WEEK = 168
 
 
@@ -112,3 +113,52 @@ def client_frame(client: str, freq: str = "1h", hourly: pd.DataFrame | None = No
     if freq and pd.Timedelta(pd.tseries.frequencies.to_offset(freq)) != pd.Timedelta(hours=1):
         s = s.resample(freq).mean()
     return frame_from_series(s)
+
+
+def load_uci_batch(n_series: int = 10, prefix: str = "MT_2", resample_freq: str = "1h", raw = None, out = None, random_state: int | None = None) -> dict[str, tuple[pd.DataFrame, int]]:
+    """Loads N distinct active clients starting with a specific prefix (e.g., 'MT_200') 
+    from the UCI Electricity hourly table at random, returning a dictionary of {client_id: (df, period)}.
+    """
+    if random_state is not None:
+        random.seed(random_state)
+        
+    hourly = load_hourly(raw=raw)
+    
+    # 1. Filter columns starting with the prefix (using .startswith for strict matching)
+    matching_cols = [col for col in hourly.columns if col.startswith(prefix)]
+    
+    if not matching_cols:
+        raise ValueError(f"No columns found starting with prefix '{prefix}'.")
+
+    # 2. Randomly shuffle the matching columns so select_clients picks randomly 
+    # instead of sequentially from left to right.
+    matching_cols_shuffled = matching_cols.copy()
+    random.shuffle(matching_cols_shuffled)
+
+    # 3. Create a temporary DataFrame subset containing only these shuffled columns
+    # so select_clients can iterate over them in random order.
+    hourly_subset = hourly[['timestamp'] + matching_cols_shuffled] if 'timestamp' in hourly.columns else hourly[matching_cols_shuffled]
+
+    # 4. Call select_clients completely unmodified
+    selected_clients = select_clients(hourly_subset, n=n_series)
+    
+    if not selected_clients:
+        raise ValueError(f"No active clients found starting with prefix '{prefix}' meeting the criteria.")
+
+    batch_dict = {}
+    period = 24  # Hourly data daily period
+
+    for client in selected_clients:
+        df_sub = client_frame(client, resample_freq, hourly)
+        
+        if "timestamp" not in df_sub.columns and "time" in df_sub.columns:
+            df_sub = df_sub.rename(columns={"time": "timestamp"})
+        elif "timestamp" not in df_sub.columns:
+            df_sub = df_sub.reset_index().rename(columns={df_sub.index.name or "index": "timestamp"})
+            
+        df_sub = df_sub[["timestamp", "value"]].copy()
+        df_sub["value"] = pd.to_numeric(df_sub["value"], errors="coerce").ffill()
+        
+        batch_dict[client] = (df_sub, period)
+
+    return batch_dict

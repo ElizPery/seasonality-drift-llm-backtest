@@ -12,9 +12,9 @@ from sklearn.metrics import precision_recall_fscore_support
 from src.detector.baseline_detectors import BaselineDetectorWrapper
 
 
-def run_all_baseline_detectors(data_dir: str = "data"):
+def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "benchmark_manifest.json", output_file: str = "baseline_evaluation_results.csv"):
     processed_dir = Path(data_dir) / "processed"
-    manifest_path = processed_dir / "benchmark_manifest.json"
+    manifest_path = processed_dir / manifest_file
 
     if not manifest_path.exists():
         print(f"[Error] Benchmark manifest not found at {manifest_path}. Run generate_benchmarks.py first!")
@@ -178,7 +178,31 @@ def run_all_baseline_detectors(data_dir: str = "data"):
 
     # Save results summary
     results_df = pd.DataFrame(results)
-    results_path = processed_dir / "baseline_evaluation_results.csv"
+
+    group_cols = ["dataset", "level", "drift_type", "magnitude", "method"]
+    metric_cols = [
+        "false_alarms",
+        "far_per_1000",
+        "precision",
+        "recall",
+        "f1_score",
+        "detection_delay",
+        "detected",
+    ]
+
+    # Ensure all target metric columns exist even if a specific level wasn't present in the manifest
+    for col in metric_cols:
+        if col not in results_df.columns:
+            results_df[col] = np.nan
+
+    # Group by experimental configuration and average across series (NaNs are ignored by .mean())
+    summary_df = (
+        results_df.groupby(group_cols, as_index=False, dropna=False)[metric_cols]
+        .mean()
+        .round(4)
+    )
+
+    results_path = processed_dir / output_file
     results_df.to_csv(results_path, index=False)
     print(f"\nEvaluation complete! Baseline results saved to: {results_path}")
     return results_df

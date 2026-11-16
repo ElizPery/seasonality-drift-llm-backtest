@@ -10,6 +10,17 @@ import pandas as pd
 
 TCPD_DIR = Path("data/raw/tcpd")
 
+DEFAULT_TCPD_PERIODS = {
+    "jfk_passengers": 12,     # Monthly seasonality
+    "lga_passengers": 12,     # Monthly seasonality
+    "construction": 12,       # Monthly seasonality
+    "iceland_tourism": 12,    # Monthly seasonality
+    "seatbelts": 12,          # Monthly seasonality
+    "us_population": 12,      # Monthly/annual periodicity
+    "occupancy": 1440,          # Daily/hourly cycle
+    "measles": 52,            # Weekly seasonality
+}
+
 
 def load_tcpd_series(name: str = "jfk_passengers", frequency: str = "1min", raw_dir: str | Path = TCPD_DIR) -> pd.DataFrame:
     """Standard frame of one TCPD series; a nominal calendar with step `frequency` when the file has no timestamps."""
@@ -52,3 +63,44 @@ def load_tcpd_annotated_series(name: str = "jfk_passengers", frequency: str = "1
                 cp_set.update(points)
         ground_truth_cp = sorted(cp_set)
     return df, ground_truth_cp
+
+def load_tcpd_batch(
+    series_names: list[str] = [
+        "jfk_passengers", 
+        "lga_passengers", 
+        "construction", 
+        "iceland_tourism", 
+        "seatbelts", 
+        "us_population", 
+        "occupancy", 
+        "measles"
+    ],
+    frequency: str | dict[str, str] = "1min",
+    period: int | dict[str, int | None] | None = None,
+    annotator_key: str | dict[str, str | None] | None = None,
+    raw_dir: str | Path = TCPD_DIR,
+) -> dict[str, tuple[pd.DataFrame, int | None, list[int]]]:
+    """Loads a batch of TCPD series with their annotated change points and individual seasonal periods."""
+    batch_dict = {}
+    for name in series_names:
+        freq = frequency.get(name, "1min") if isinstance(frequency, dict) else frequency
+        ann_key = annotator_key.get(name, None) if isinstance(annotator_key, dict) else annotator_key
+        
+        # Resolve seasonal period (per-dataset dict -> global override -> default mapping)
+        if isinstance(period, dict):
+            p = period.get(name, DEFAULT_TCPD_PERIODS.get(name, None))
+        elif period is not None:
+            p = period
+        else:
+            p = DEFAULT_TCPD_PERIODS.get(name, None)
+
+        df, ground_truth_cp = load_tcpd_annotated_series(
+            name=name, 
+            frequency=freq, 
+            annotator_key=ann_key, 
+            raw_dir=raw_dir
+        )
+        
+        batch_dict[name] = (df, p, ground_truth_cp)
+        
+    return batch_dict
