@@ -225,6 +225,149 @@ def generate_all_benchmarks(data_dir: str = "data"):
 
     print(f"\n3-Level Benchmark Generation Complete! Manifest saved to: {manifest_path}")
 
+def generate_multi_series_benchmarks(datasets: Dict[str, Dict[str, Any]], data_dir: str = "data"):
+    """
+    Generate Level 1, Level 2, and Level 3 benchmarks from a pre-loaded multi-series datasets dictionary.
+    
+    :param datasets: Dictionary containing dataset batch names mapped to series dictionaries 
+                     (e.g., {"Alibaba": {series_id: (df, period), ...}, ...}).
+    :param data_dir: Path to base data directory containing raw and processed folders.
+    """
+    processed_dir = Path(data_dir) / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
 
+    print("=== Starting 3-Level Multi-Series Benchmark Generation ===")
+
+    # Target parameters for Level 2 semi-synthetic drift injection
+    drift_types = ["abrupt", "gradual", "seasonal_amplitude"]
+    magnitudes = [0.5, 1.0, 2.0, 3.0]  # Magnitudes in sigma standard deviations[cite: 21]
+
+    metadata_catalog: List[Dict[str, Any]] = []
+
+    for ds_name, series_dict in datasets.items():
+        print(f"\nProcessing dataset batch: '{ds_name}' ({len(series_dict)} time series)")
+
+        if not series_dict:
+            print(f"  [Skipped] Batch for '{ds_name}' is empty.")
+            continue
+
+        for series_id, payload in series_dict.items():
+            print(f" -> Processing series ID: {series_id}")
+
+            # Unpack payload dynamically based on tuple structure 
+            # (2 elements for Alibaba/UCI: (df, period); 3 elements for TCPD/SeisBench: (df, period, ground_truth_cps))
+            if len(payload) == 2:
+                raw_df, period = payload
+                ground_truth_cps = None
+            elif len(payload) == 3:
+                raw_df, period, ground_truth_cps = payload
+            else:
+                print(f"    [Skipped] Unexpected payload length ({len(payload)}) for series '{series_id}'.")
+                continue
+
+            if not isinstance(raw_df, pd.DataFrame) or raw_df.empty:
+                print(f"    [Skipped] Series '{series_id}' contains invalid or empty data.")
+                continue
+
+            # Handle non-integer or 'Not applicable' periods (e.g., seismic waveforms) for STL initialization
+            gen_period = period if isinstance(period, int) and period > 0 else 50
+
+            try:
+                generator = DriftGenerator(raw_df, seasonality_period=gen_period)
+            except Exception as e:
+                print(f"    [Skipped] DriftGenerator initialization failed for {ds_name}-{series_id}: {e}")
+                continue
+
+            # -----------------------------------------------------------------
+            # Level 1: Drift-Free Baseline Series (FAR Evaluation)
+            # -----------------------------------------------------------------
+            try:
+                level1_df = generator.generate_level1_baseline()
+                level1_filename = f"level1_clean_{ds_name}_{series_id}.csv"
+                level1_path = processed_dir / level1_filename
+                level1_df.to_csv(level1_path, index=False)
+
+                metadata_catalog.append({
+                    "dataset_name": ds_name,
+                    "series_id": str(series_id),
+                    "level": 1,
+                    "filename": level1_filename,
+                    "drift_type": "none",
+                    "magnitude_sigma": 0.0,
+                    "change_point_idx": None,
+                    "seasonality_period": period
+                })
+                print(f"    [Level 1] Saved clean baseline -> {level1_filename}")
+            except Exception as e:
+                print(f"    [Error Level 1] {e}")
+
+            # -----------------------------------------------------------------
+            # Level 2: Controlled Semi-Synthetic Drift Injections (Alibaba & UCI Electricity)
+            # -----------------------------------------------------------------
+            if ds_name in ["Alibaba", "UCI_Electricity"]:
+                change_idx = len(raw_df) // 2  # Change point placed at 50% length[cite: 21]
+
+                for d_type in drift_types:
+                    for mag in magnitudes:
+                        try:
+                            injected_df, drift_meta = generator.inject_level2_drift(
+                                drift_type=d_type,
+                                change_point_idx=change_idx,
+                                magnitude_sigma=mag
+                            )
+
+                            level2_filename = f"level2_{ds_name}_{series_id}_{d_type}_mag{mag}sig.csv"
+                            level2_path = processed_dir / level2_filename
+                            injected_df.to_csv(level2_path, index=False)
+
+                            metadata_catalog.append({
+                                "dataset_name": ds_name,
+                                "series_id": str(series_id),
+                                "level": 2,
+                                "filename": level2_filename,
+                                "drift_type": d_type,
+                                "magnitude_sigma": mag,
+                                "change_point_idx": drift_meta["change_point_idx"],
+                                "change_point_timestamp": str(drift_meta["change_point_timestamp"]),
+                                "absolute_delta": drift_meta["absolute_delta"],
+                                "seasonality_period": period
+                            })
+                        except Exception as e:
+                            print(f"    [Error Level 2 ({d_type}, {mag}σ)] {e}")
+                print(f"    [Level 2] Completed drift injections for {ds_name}-{series_id}")
+
+            # -----------------------------------------------------------------
+            # Level 3: Real-World Datasets with Ground-Truth Annotations (TCPD & SeisBench)
+            # -----------------------------------------------------------------
+            if ground_truth_cps is not None:
+                level3_filename = f"level3_{ds_name}_{series_id}.csv"
+                level3_path = processed_dir / level3_filename
+                raw_df.to_csv(level3_path, index=False)
+
+                gt_timestamps = [
+                    str(raw_df.loc[idx, "timestamp"]) 
+                    for idx in ground_truth_cps 
+                    if "timestamp" in raw_df.columns and idx < len(raw_df)
+                ]
+
+                metadata_catalog.append({
+                    "dataset_name": ds_name,
+                    "series_id": str(series_id),
+                    "level": 3,
+                    "filename": level3_filename,
+                    "drift_type": "real_consensus_annotation" if ds_name == "TCPD" else "seismic_single_wave_arrival",
+                    "magnitude_sigma": None,
+                    "change_point_indices": ground_truth_cps,
+                    "change_point_timestamps": gt_timestamps,
+                    "seasonality_period": period
+                })
+                print(f"    [Level 3] Saved annotated series ({len(ground_truth_cps)} change points) -> {level3_filename}")
+
+    # Save comprehensive benchmark manifest
+    manifest_path = processed_dir / "multi_series_benchmark_manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(metadata_catalog, f, indent=4)
+
+    print(f"\nMulti-Series 3-Level Benchmark Generation Complete! Manifest saved to: {manifest_path}")
 if __name__ == "__main__":
     generate_all_benchmarks()
