@@ -25,3 +25,7 @@ Thumbs.db
 mlruns/
 logs/
 *.log
+
+# Stored LLM answers (kept as a separate archive)
+data/llm_answers/
+data/llm_probe/

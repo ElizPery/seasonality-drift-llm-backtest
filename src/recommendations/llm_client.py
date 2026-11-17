@@ -4,12 +4,15 @@ advisors that turn a decision point into one action of the catalog.
 At a decision origin T the advisor sees a short description of the series computed from data before T
 only: how the error of the deployed model changed week by week, its bias, how the level, the daily
 profile and the noise moved, and how long ago the model was last changed. It answers with one action
-name from the catalog and a short reason. The answer schema is a Pydantic model; Instructor validates
+name from the catalog and a short reason. Four prompt variants (`PROMPTS`) differ in what the advisor is
+told: the system prompt alone ("base"), with instructions on how to read the diagnostics ("instructions"),
+with the instructions and worked examples ("examples"), or no diagnostics at all ("bare", the ablation). The answer schema is a Pydantic model; Instructor validates
 the reply and asks again if it does not fit (JSON mode: newer Claude models reject a forced tool call,
 which the default tools mode of Instructor sends).
 
 Every LLM answer is stored in a JSON lines cache keyed by the model, the prompt and the repeat number, so
-a rerun of the experiments reads the stored answers and needs no API key. `RuleAdvisor` applies fixed
+a rerun of the experiments reads the stored answers and needs no API key. The model string names the
+provider first: "openrouter/mistralai/...", "anthropic/...", "ollama/...". `RuleAdvisor` applies fixed
 rules to the same numbers: a non-LLM baseline that also lets the whole pipeline run without a key.
 """
 from __future__ import annotations
@@ -17,32 +20,44 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.recommendations.catalog import CATALOG
 from src.recommendations.forecast import DAY, WEEK
 
 ACTION_NAMES = tuple(a.name for a in CATALOG)
 DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"
-CACHE_DIR = Path("data/llm_answers")  # tracked by git: a rerun from the stored answers needs no API key
-# the API key is read from this file (one line ANTHROPIC_API_KEY=...), not from the shell environment
-KEY_FILE = Path(os.environ.get("LLM_KEY_FILE", "~/.config/diploma/anthropic.env")).expanduser()
+CACHE_DIR = Path("data/llm_answers")  # not in git: a rerun with the stored answers in place needs no API key
+# API keys are read from files, not from the shell environment: <provider>.env in this folder with one line
+# <PROVIDER>_API_KEY=..., e.g. openrouter.env with OPENROUTER_API_KEY=...
+KEY_DIR = Path(os.environ.get("LLM_KEY_DIR", "~/.config/diploma")).expanduser()
+PROMPTS = ("base", "instructions", "examples", "bare", "rich")
 
 
 class Recommendation(BaseModel):
     action: Literal[ACTION_NAMES] = Field(description="name of exactly one action from the catalog")
     reason: str = Field(max_length=400, description="one or two sentences: which numbers led to this choice")
 
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _cut(cls, v):
+        # a reason longer than the limit is cut, not re-asked: some models write long reasons at every attempt,
+        # and the action, not the wording, is what the experiment evaluates
+        return v[:400] if isinstance(v, str) and len(v) > 400 else v
+
 
 def diagnostics(y: np.ndarray, pred: np.ndarray, T: int, t_deploy: int, scale: float, last_change: int,
-                alarm: dict | None = None) -> dict:
+                alarm: dict | None = None, history: list | None = None, kind: str | None = None) -> dict:
     """Numbers the advisor sees at the decision origin T. Only data before T is used; errors are those of
-    the forecasts the deployed strategy actually made (`pred`). Values are in MASE scale units."""
+    the forecasts the deployed strategy actually made (`pred`). Values are in MASE scale units. The fields
+    after `alarm` feed the "rich" prompt only: `history` lists the decisions taken so far as (origin, action),
+    `kind` says what the series measures (no date, no place: nothing the model could recognise)."""
     last = np.arange(T - WEEK, T)
     before = np.arange(T - 5 * WEEK, T - WEEK)  # the 4 weeks before the last one
     first = np.arange(t_deploy, min(t_deploy + 2 * WEEK, T - WEEK))
@@ -67,6 +82,28 @@ def diagnostics(y: np.ndarray, pred: np.ndarray, T: int, t_deploy: int, scale: f
         weeks_since_change=round((T - last_change) / WEEK, 1),
         weeks_of_history=round(T / WEEK, 1),
         alarm=alarm,
+        **_rich_fields(y, pred, T, t_deploy, scale, mase, history, kind),
+    )
+
+
+def _rich_fields(y, pred, T, t_deploy, scale, mase, history, kind) -> dict:
+    """Extra fields of the "rich" prompt: the error and bias of each of the last 14 days, the last 48 hours
+    of actual values against the forecast (series units, 3 significant digits), and the previous decision
+    with the error of the week before and the week after it, once that week has passed."""
+    days = [o for o in range(T - 14 * DAY, T, DAY) if o >= t_deploy]
+    last = None
+    for t_dec, action in reversed(history or []):
+        if t_dec + WEEK <= T and t_dec - WEEK >= t_deploy:
+            last = dict(action=action, weeks_ago=round((T - t_dec) / WEEK, 1),
+                        mase_week_before=round(mase(np.arange(t_dec - WEEK, t_dec)), 2),
+                        mase_week_after=round(mase(np.arange(t_dec, t_dec + WEEK)), 2))
+            break
+    return dict(
+        daily_errors=[round(mase(np.arange(o, o + DAY)), 2) for o in days],
+        daily_bias=[round(float(np.mean(y[o:o + DAY] - pred[o:o + DAY])) / scale, 2) for o in days],
+        recent_hours=[[float(f"{a:.3g}"), float(f"{f:.3g}")] for a, f in zip(y[T - 2 * DAY:T], pred[T - 2 * DAY:T])],
+        last_decision=last,
+        kind=kind,
     )
 
 
@@ -96,18 +133,112 @@ USER_BARE = """{alarm_text}
 
 Which action do you choose?"""
 
+# "rich": the diagnostics of "base" plus what an analyst would also look at, all from data before the origin
+USER_RICH_EXTRA = """Additional context:
+- the series: {kind}
+- forecast error per day over the last {n_days} days, oldest first: {daily_errors}
+- bias per day over the same days (positive: actual above the forecast): {daily_bias}
+- the last 48 hours, actual / forecast, oldest first: {recent_hours}
+- previous decision: {last_decision}"""
 
-def render_prompt(ctx: dict, with_diagnostics: bool = True) -> tuple[str, str]:
-    """System and user messages. Without diagnostics (ablation) the advisor only knows that a review is due."""
+# "instructions" and "examples": how to read the diagnostics, appended to the system prompt. The thresholds are
+# those of `RuleAdvisor`; the instructions also say when each of the other catalog actions fits
+INSTRUCTIONS = """How to read the diagnostics:
+- First compare the error of the last weeks with the error in the first weeks. If it is at most about 20%
+  higher, the model still works: choose keep.
+- If the noise ratio is about 1.5 or higher while the level and the daily profile hardly moved, the series
+  became noisier. No action removes noise, and a model retrained on a noisy window gets worse: choose keep.
+- If the series jumped once to a new level (a large bias of the same sign as the level change, noise and
+  amplitude about the same, the error rose and then stopped growing), its shape did not change:
+  recalibrate_level shifts the forecast by the bias of the last week without retraining.
+- If the error grows week after week while the level keeps moving, the series is still changing: retrain on
+  a recent window. retrain_2w follows the change fastest, retrain_8w is steadier, reweight_1w keeps all
+  history but gives the last weeks the most weight.
+- If the daily profile amplitude changed (a ratio far from 1) and the error grew, the shape of the day
+  changed: add_profile gives the model the mean profile of the last 4 weeks.
+- retrain_full suits a slow drift without a clear break when the model is many weeks old.
+- If the model was changed less than 2 weeks ago, give the change time: prefer keep unless the error is
+  clearly growing.
+- A detector alarm alone is not a reason to act: check whether the error actually grew."""
+
+# "examples": worked decisions at weekly reviews of the synthetic series MT_001/s9 (UCI client MT_001,
+# seed 9; the experiments use seeds 0-2, so no example comes from an evaluated series), deployed model
+# never changed. In each the chosen action had the lowest MASE over the following week among the catalog
+# actions (keep 0.796; recalibrate_level 0.862 against keep 1.093; retrain_2w 0.844 against keep 1.390;
+# keep 1.755 against 1.79 and more for any change)
+EXAMPLES = (
+    (dict(mase_first_weeks=0.83, mase_last_weeks=[0.85, 0.79, 0.79], bias_last_week=-0.13, level_change=-0.09,
+          amplitude_ratio=1.16, noise_ratio=0.94, weeks_since_change=5.0, weeks_of_history=15.0),
+     "keep", "The error of the last weeks (0.79) is not above the first weeks (0.83); bias, level and noise are "
+             "small. Nothing to fix."),
+    (dict(mase_first_weeks=0.83, mase_last_weeks=[0.85, 1.63, 1.09], bias_last_week=0.88, level_change=1.38,
+          amplitude_ratio=1.16, noise_ratio=0.91, weeks_since_change=5.0, weeks_of_history=15.0),
+     "recalibrate_level", "The level jumped (+1.38) and the forecast is too low (bias +0.88), while noise is "
+                          "stable and the error already fell from 1.63 to 1.09: a one-time shift, the shape is "
+                          "unchanged, so a level correction is enough."),
+    (dict(mase_first_weeks=0.83, mase_last_weeks=[0.78, 0.85, 1.2], bias_last_week=0.78, level_change=0.84,
+          amplitude_ratio=1.13, noise_ratio=1.04, weeks_since_change=4.0, weeks_of_history=14.0),
+     "retrain_2w", "The error grows every week (0.78, 0.85, 1.2) and the level is rising (+0.84) with stable "
+                   "noise: the series is still changing, so the model should learn from the recent weeks."),
+    (dict(mase_first_weeks=0.83, mase_last_weeks=[0.78, 0.85, 1.42], bias_last_week=0.3, level_change=0.36,
+          amplitude_ratio=1.22, noise_ratio=1.7, weeks_since_change=4.0, weeks_of_history=14.0),
+     "keep", "The error grew, but together with the noise (ratio 1.7) while the bias and the level change are "
+             "small: the series became noisier, and retraining cannot remove noise."),
+)
+
+
+def _alarm_text(ctx: dict) -> str:
+    alarm = ctx.get("alarm")
+    return (f"a drift detector ({alarm['method']}) raised an alarm {alarm['hours_ago']} hours ago" if alarm
+            else "scheduled weekly review, no detector alarm attached")
+
+
+def _user_full(ctx: dict) -> str:
+    weeks_text = ", ".join(str(w) for w in ctx["mase_last_weeks"])
+    return USER_FULL.format(**ctx, alarm_text=_alarm_text(ctx), weeks_text=weeks_text)
+
+
+def _user_rich(ctx: dict) -> str:
+    head, question = _user_full(ctx).rsplit("\n\n", 1)
+    d = ctx.get("last_decision")
+    last = (f"{d['action']} {d['weeks_ago']} weeks ago; error in the week before it {d['mase_week_before']}, "
+            f"in the week after it {d['mase_week_after']}" if d else "none yet")
+    extra = USER_RICH_EXTRA.format(
+        kind=ctx.get("kind") or "an hourly series", n_days=len(ctx["daily_errors"]),
+        daily_errors=", ".join(str(v) for v in ctx["daily_errors"]),
+        daily_bias=", ".join(f"{v:+}" for v in ctx["daily_bias"]),
+        recent_hours=", ".join(f"{a:g}/{f:g}" for a, f in ctx["recent_hours"]), last_decision=last)
+    return f"{head}\n\n{extra}\n\n{question}"
+
+
+def render_examples() -> str:
+    parts = ["Examples of decisions on other series:"]
+    for i, (ctx, action, reason) in enumerate(EXAMPLES, 1):
+        diag = _user_full(ctx).rsplit("\n\n", 1)[0]  # without the closing question
+        answer = json.dumps(dict(action=action, reason=reason))
+        parts.append(f"Example {i}.\n{diag}\nAnswer: {answer}")
+    return "\n\n".join(parts)
+
+
+def render_prompt(ctx: dict, prompt: str = "base") -> tuple[str, str]:
+    """System and user messages of a prompt variant (see `PROMPTS`). "bare" (ablation): the advisor only knows
+    that a review is due; "instructions" and "examples" extend the system prompt of "base"; "rich" extends the
+    user message of "base" with daily errors, the last 48 hours and the previous decision."""
+    if prompt not in PROMPTS:
+        raise ValueError(f"unknown prompt variant {prompt!r}, expected one of {PROMPTS}")
     catalog = "\n".join(f'- {a.name}: {a.title} ({"retrains the model" if a.kind == "retrain" else "no retraining"})'
                         for a in CATALOG)
-    alarm = ctx.get("alarm")
-    alarm_text = (f"a drift detector ({alarm['method']}) raised an alarm {alarm['hours_ago']} hours ago" if alarm
-                  else "scheduled weekly review, no detector alarm attached")
-    weeks_text = ", ".join(str(w) for w in ctx["mase_last_weeks"])
-    user = (USER_FULL.format(**ctx, alarm_text=alarm_text, weeks_text=weeks_text) if with_diagnostics
-            else USER_BARE.format(alarm_text=alarm_text[0].upper() + alarm_text[1:]))
-    return SYSTEM.format(catalog=catalog), user
+    system = SYSTEM.format(catalog=catalog)
+    if prompt in ("instructions", "examples"):
+        system += "\n\n" + INSTRUCTIONS
+    if prompt == "examples":
+        system += "\n\n" + render_examples()
+    if prompt == "bare":
+        alarm_text = _alarm_text(ctx)
+        return system, USER_BARE.format(alarm_text=alarm_text[0].upper() + alarm_text[1:])
+    if prompt == "rich":
+        return system, _user_rich(ctx)
+    return system, _user_full(ctx)
 
 
 def cache_key(model: str, system: str, user: str, repeat: int) -> str:
@@ -121,7 +252,7 @@ class RuleAdvisor:
 
     name = "rules"
 
-    def recommend(self, ctx: dict, repeat: int = 0, with_diagnostics: bool = True) -> Recommendation:
+    def recommend(self, ctx: dict, repeat: int = 0) -> Recommendation:
         worse = ctx["mase_last_weeks"][-1] / ctx["mase_first_weeks"] if ctx["mase_first_weeks"] > 0 else 1.0
         if worse < 1.2:
             return Recommendation(action="keep", reason=f"error ratio {worse:.2f} below 1.2")
@@ -139,15 +270,21 @@ class LLMAdvisor:
     answer is missing from the cache, so a rerun from stored answers needs no API key."""
 
     def __init__(self, model: str = DEFAULT_MODEL, cache_dir: Path = CACHE_DIR, mode=None, max_retries: int = 2,
-                 max_tokens: int = 2048, effort: str | None = "low", client=None, with_diagnostics: bool = True):
-        # `with_diagnostics=False` is the ablation: the advisor only learns that a review is due (and the alarm, if any);
-        # its rows carry the name with the suffix "|bare", so both variants can live in one results file
-        self.with_diagnostics = with_diagnostics
-        self.name = model if with_diagnostics else f"{model}|bare"
+                 max_tokens: int = 2048, effort: str | None = "low", client=None, prompt: str = "base", timeout: float = 120.0):
+        # `effort`: reasoning effort of models that reason before answering ("low" by default); "off" switches reasoning
+        # off where the provider allows it (OpenRouter), so that sizes of one model family are compared without it
+        # rows of a prompt variant other than "base" carry the model name with the suffix "|<variant>", so all
+        # variants can live in one results file
+        if prompt not in PROMPTS:
+            raise ValueError(f"unknown prompt variant {prompt!r}, expected one of {PROMPTS}")
+        self.prompt = prompt
+        self.name = model if prompt == "base" else f"{model}|{prompt}"
         self.model, self.mode, self.max_retries, self.max_tokens, self.effort = model, mode, max_retries, max_tokens, effort
+        self.timeout = timeout  # seconds per request: a hung connection must not stall a worker process
         self.cache_dir = Path(cache_dir)
         self._client = client
         self.calls = 0  # answers requested from the API in this process (not read from the cache)
+        self.errors = 0  # requests that failed after all retries (the model was kept, see `error` in the record)
         self._cache = {}
         for f in sorted(self.cache_dir.glob("answers_*.jsonl")):
             for line in f.read_text().splitlines():
@@ -158,34 +295,58 @@ class LLMAdvisor:
         if self._client is None:
             import instructor
 
-            key = None
-            if KEY_FILE.exists():
-                for line in KEY_FILE.read_text().splitlines():
-                    if line.strip().startswith("ANTHROPIC_API_KEY="):
+            provider = self.model.split("/", 1)[0]
+            key_file, key = KEY_DIR / f"{provider}.env", None
+            if key_file.exists():
+                for line in key_file.read_text().splitlines():
+                    if line.strip().startswith(f"{provider.upper()}_API_KEY="):
                         key = line.split("=", 1)[1].strip().strip('"')
             # providers without a key (a local Ollama server) get their own default when no key file is set
             kw = {"api_key": key} if key else {}
             self._client = instructor.from_provider(self.model, mode=self.mode or instructor.Mode.JSON, **kw)
         return self._client
 
-    def recommend(self, ctx: dict, repeat: int = 0, with_diagnostics: bool | None = None) -> Recommendation:
-        if with_diagnostics is None:
-            with_diagnostics = self.with_diagnostics
-        system, user = render_prompt(ctx, with_diagnostics)
+    def recommend(self, ctx: dict, repeat: int = 0) -> Recommendation:
+        system, user = render_prompt(ctx, self.prompt)
         key = cache_key(self.model, system, user, repeat)
         if key in self._cache:
             return Recommendation.model_validate(self._cache[key]["answer"])
-        extra = {"extra_body": {"output_config": {"effort": self.effort}}} if self.effort and self.model.startswith("anthropic/") else {}
-        rec, completion = self._get_client().create_with_completion(
-            response_model=Recommendation, messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-            max_retries=self.max_retries, max_tokens=self.max_tokens, **extra)
+        # low reasoning effort: the Anthropic API takes output_config, OpenRouter a reasoning block (ignored by models without reasoning)
+        extra = {}
+        if self.effort and self.model.startswith("anthropic/"):
+            extra = {"extra_body": {"output_config": {"effort": self.effort}}}
+        elif self.effort == "off" and self.model.startswith("openrouter/"):
+            extra = {"extra_body": {"reasoning": {"enabled": False}}}
+        elif self.effort and self.model.startswith("openrouter/"):
+            extra = {"extra_body": {"reasoning": {"effort": self.effort}}}
+        error, usage = None, None
+        for attempt in range(3):  # transport or validation failures after the retries of Instructor: wait and ask again
+            try:
+                rec, completion = self._get_client().create_with_completion(
+                    response_model=Recommendation, messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                    max_retries=self.max_retries, max_tokens=self.max_tokens, timeout=self.timeout, **extra)
+                usage = getattr(completion, "usage", None)
+                break
+            except Exception as e:  # noqa: BLE001 - the run must not die on one request; the failure is recorded
+                error = f"{type(e).__name__}: {str(e)[:300]}"
+                print(f"advisor {self.model}: attempt {attempt + 1} failed: {error}", file=sys.stderr, flush=True)
+                time.sleep(5 * 3**attempt)
+        else:
+            # the advisor is unavailable at this review: keep the model, and the record says so (`error`)
+            rec = Recommendation(action="keep", reason=f"advisor unavailable: {error}"[:400])
+            self.errors += 1
         self.calls += 1
-        usage = getattr(completion, "usage", None)
-        record = dict(key=key, model=self.model, repeat=repeat, with_diagnostics=with_diagnostics, user=user,
-                      answer=rec.model_dump(), time=time.strftime("%Y-%m-%dT%H:%M:%S"),
-                      input_tokens=getattr(usage, "input_tokens", None), output_tokens=getattr(usage, "output_tokens", None))
+        # Anthropic reports input/output tokens, OpenAI-compatible providers (OpenRouter, Ollama) prompt/completion
+        tokens_in = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None)
+        tokens_out = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None)
+        record = dict(key=key, model=self.model, repeat=repeat, prompt=self.prompt, with_diagnostics=self.prompt != "bare",
+                      user=user, answer=rec.model_dump(), time=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                      input_tokens=tokens_in, output_tokens=tokens_out, error=error if usage is None else None, effort=self.effort)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.cache_dir / f"answers_{os.getpid()}.jsonl", "a") as f:  # one file per process: no write races
+        # a failed request is logged but not cached, so a rerun asks the model again instead of keeping the fallback
+        name = f"answers_{os.getpid()}.jsonl" if usage is not None else f"errors_{os.getpid()}.jsonl"
+        with open(self.cache_dir / name, "a") as f:  # one file per process: no write races
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._cache[key] = record
+        if usage is not None:
+            self._cache[key] = record
         return rec
