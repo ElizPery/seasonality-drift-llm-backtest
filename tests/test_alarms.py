@@ -163,6 +163,7 @@ def test_residual_conformal_alarms_are_those_of_the_stream_a_detector_dated_at_t
     assert ours["threshold"].tolist() == [a["threshold"] for a, ok in zip(hers, inside) if ok]
     late = residual_conformal_alarms(y, T_DEPLOY, mult)
     assert late["index"].tolist() == known[(known >= T_DEPLOY) & inside].tolist()
+    assert len(residual_conformal_alarms(y[: d.period + d.cal_window - 1], 0, mult)) == 0  # too short for the detector
 
 
 def test_residual_conformal_alarms_do_not_depend_on_later_values():

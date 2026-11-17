@@ -212,6 +212,8 @@ def residual_conformal_alarms(y: np.ndarray, start: int, mult: float) -> pd.Data
     block (see `ResidualStream`), with the score and the threshold of `fit_predict`; alarms known before `start`
     or only after the end of the series are dropped."""
     d = residual_detector(mult)
+    if len(y) < d.period + d.cal_window:  # shorter than the detector accepts: nothing can be known yet
+        return pd.DataFrame(columns=["index", "score", "threshold"])
     score, base, shift, iqr = residual_score_table(y).T
     with np.errstate(invalid="ignore"):
         viol = residual_violation(score, base, shift, iqr, mult, d.var_window)
