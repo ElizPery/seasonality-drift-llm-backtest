@@ -115,7 +115,7 @@ def client_frame(client: str, freq: str = "1h", hourly: pd.DataFrame | None = No
     return frame_from_series(s)
 
 
-def load_uci_batch(n_series: int = 10, prefix: str = "MT_2", resample_freq: str = "1h", raw = None, out = None, random_state: int | None = None) -> dict[str, tuple[pd.DataFrame, int]]:
+def load_uci_batch(n_series: int = 10, prefix: str = "MT_2", resample_freq: str = "1h", check_window: tuple[str, str] | None = ("2013-01-01", "2013-12-31"), raw = None, out = None, random_state: int | None = None) -> dict[str, tuple[pd.DataFrame, int]]:
     """Loads N distinct active clients starting with a specific prefix (e.g., 'MT_200') 
     from the UCI Electricity hourly table at random, returning a dictionary of {client_id: (df, period)}.
     """
@@ -158,6 +158,11 @@ def load_uci_batch(n_series: int = 10, prefix: str = "MT_2", resample_freq: str 
             
         df_sub = df_sub[["timestamp", "value"]].copy()
         df_sub["value"] = pd.to_numeric(df_sub["value"], errors="coerce").ffill()
+        
+        if check_window is not None:
+            df_sub["timestamp"] = pd.to_datetime(df_sub["timestamp"])
+            df_sub = df_sub.set_index("timestamp")
+            df_sub = df_sub.loc[check_window[0] : check_window[1]].reset_index()
         
         batch_dict[client] = (df_sub, period)
 

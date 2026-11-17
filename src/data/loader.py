@@ -42,13 +42,13 @@ class DataLoader:
             client_id = hourly.columns[0]  # fallback to the first client, as before
         return uci.client_frame(client_id, resample_freq, hourly)
 
-    def load_uci_batch(self, n_series: int = 10, resample_freq: str = "1h", seed: int | None = None) -> dict[str, tuple[pd.DataFrame, int]]:
+    def load_uci_batch(self, n_series: int = 10, resample_freq: str = "1h", check_window: tuple[str, str] | None = ("2013-01-01", "2013-12-31"), seed: int | None = None) -> dict[str, tuple[pd.DataFrame, int]]:
         """Loads N distinct client frames from the UCI Electricity dataset."""
         raw = self.raw_dir / "LD2011_2014.txt"
         out = self.processed_dir / "uci_hourly.parquet"
         if not raw.exists() and not out.exists():
             raise FileNotFoundError(f"UCI Electricity dataset not found at {raw}. Download 'LD2011_2014.txt' there.")
-        return uci.load_uci_batch(n_series=n_series, resample_freq=resample_freq, raw=raw, out=out, random_state=seed)
+        return uci.load_uci_batch(n_series=n_series, resample_freq=resample_freq, check_window=check_window, raw=raw, out=out, random_state=seed)
 
     def load_tcpd_series(self, dataset_name: str = "jfk_passengers", frequency: str = "1min") -> pd.DataFrame:
         return tcpd.load_tcpd_series(dataset_name, frequency, self.raw_dir / "tcpd")
