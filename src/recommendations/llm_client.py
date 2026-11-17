@@ -33,7 +33,7 @@ from src.recommendations.forecast import DAY, WEEK
 
 ACTION_NAMES = tuple(a.name for a in CATALOG)
 DEFAULT_MODEL = "anthropic/claude-sonnet-5-5"
-CACHE_DIR = Path("data/llm_answers")  # tracked by git: a rerun from the stored answers needs no API key
+CACHE_DIR = Path("data/llm_answers")  # not in git: a rerun with the stored answers in place needs no API key
 # API keys are read from files, not from the shell environment: <provider>.env in this folder with one line
 # <PROVIDER>_API_KEY=..., e.g. openrouter.env with OPENROUTER_API_KEY=...
 KEY_DIR = Path(os.environ.get("LLM_KEY_DIR", "~/.config/diploma")).expanduser()

@@ -225,8 +225,9 @@ Strategies `llm` (applied as proposed) and `llm_gate` (applied only if the accep
 `rules_gate` use fixed rules on the same diagnostics. Five prompt variants (`--prompt`): `base` (the system prompt
 with the catalog and the diagnostics), `instructions` (plus how to read the diagnostics and when each action fits),
 `examples` (plus four worked decisions from a synthetic series that is not evaluated) and `bare` (ablation: no
-diagnostics). Every LLM answer is stored in `data/llm_answers/` (kept in git), so a rerun reads the stored answers
-and needs no API key. The model string names the provider first (`openrouter/...`, `anthropic/...`, `ollama/...`);
+diagnostics). Every LLM answer is stored locally in `data/llm_answers/` (not in git; the answers of the reported
+runs are kept as a separate archive), so a rerun with that folder in place reads the stored answers and needs no API
+key. The model string names the provider first (`openrouter/...`, `anthropic/...`, `ollama/...`);
 the key is read from `~/.config/diploma/<provider>.env`, one line `<PROVIDER>_API_KEY=...` (another folder can be
 set in `LLM_KEY_DIR`).
 
