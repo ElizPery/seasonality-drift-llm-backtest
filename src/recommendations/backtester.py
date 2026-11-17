@@ -141,7 +141,8 @@ def check_action(a, model: Model, y: np.ndarray, F: dict[str, np.ndarray], pred:
 
 def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: Strategy, base_features: tuple[str, ...],
              params: dict | None = None, catalog=CATALOG, cache: dict | None = None, prune_cache: bool = False,
-             advisors: dict | None = None, repeat: int = 0, alarms=None, detector: str | None = None) -> dict:
+             advisors: dict | None = None, repeat: int = 0, alarms=None, detector: str | None = None,
+             kind: str | None = None) -> dict:
     """Rolling day-ahead forecasts from `t_deploy` to the end of the series under one strategy.
 
     Retraining fits are shared through `cache` between strategies of the same series (see `make_actor`).
@@ -153,7 +154,8 @@ def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: S
     `trigger="alarm"` reviews the model at the first origin after an alarm (alarms before the origin are
     known, the origin itself is not), then ignores alarms for `cooldown_days`; alarms before deployment are
     ignored. Counters: `decisions` (review points), `proposed` (proposals of a change), `accepted` (changes
-    applied), `applied` (origins at which the model was changed), `alarms` (alarms after deployment)."""
+    applied), `applied` (origins at which the model was changed), `alarms` (alarms after deployment). `kind`
+    (what the series measures) and the decisions taken so far reach the advisor through the diagnostics."""
     n = len(y)
     origins = list(range(t_deploy, n - DAY + 1, DAY))
     end = origins[-1] + DAY
@@ -164,7 +166,7 @@ def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: S
 
     model, _ = act(ACTIONS["retrain_full"], Model(base_features), t_deploy)
     pred = np.full(n, np.nan)
-    retrains, picks, applied = 0, [], []
+    retrains, picks, applied, history = 0, [], [], []
     decisions = proposed = accepted = check_fits = 0
     last_change = t_deploy
     seen = int(np.searchsorted(alarms, t_deploy))  # alarms consumed or ignored so far
@@ -204,7 +206,7 @@ def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: S
                     picks.append(best if ok else "keep")
             elif strategy.policy == "advised":
                 if T - VAL_WEEKS * WEEK >= t_deploy:
-                    ctx = diagnostics(y, pred, T, t_deploy, scale, last_change, alarm=alarm)
+                    ctx = diagnostics(y, pred, T, t_deploy, scale, last_change, alarm=alarm, history=history, kind=kind)
                     a = ACTIONS[advisors[strategy.advisor].recommend(ctx, repeat).action]
                     decisions += 1
                     ok = a.kind != "none"
@@ -221,6 +223,7 @@ def backtest(y: np.ndarray, F: dict[str, np.ndarray], t_deploy: int, strategy: S
                         last_change = T
                         changed = True
                     picks.append(a.name if ok else "keep")
+                    history.append((T, a.name if ok else "keep"))
             else:  # hindsight oracle: best action on the next decision window
                 rows = np.arange(T, min(T + strategy.cadence_days * DAY, end))
                 best = None
@@ -279,23 +282,29 @@ def evaluate_series(s: dict, params: dict | None = None, strategies=STRATEGIES, 
     model change after it)."""
     y, F, t_dep, t_chg = s["y"], s["F"], s["t_deploy"], s["t_change"]
     scale = mase_scale(y[:t_dep])
+    kind = KINDS.get(s["source"])
     cache: dict = {}
     jobs = [(st, d) for st in strategies for d in ([None] if st.trigger == "calendar" else sorted(alerts or {}))]
     runs = {}
     for i, (st, d) in enumerate(jobs):
         runs[(st.name, d)] = backtest(y, F, t_dep, st, s["base_features"], params, cache=cache, prune_cache=(i == len(jobs) - 1),
-                                      advisors=advisors, repeat=repeat, alarms=None if d is None else alerts[d], detector=d)
+                                      advisors=advisors, repeat=repeat, alarms=None if d is None else alerts[d], detector=d,
+                                      kind=kind)
     cache.clear()
     end = runs[("nothing", None)]["end"]
     naive = np.full(len(y), np.nan)
     naive[t_dep:end] = seasonal_naive(y, np.arange(t_dep, end))
     runs[("naive", None)] = dict(pred=naive, retrains=0, picks=[], end=end)
     gated = {st.name for st in strategies if st.policy in ("gated", "advised")}
+    # advised strategies record which advisor answered (`model`: the LLM model string with "|<prompt variant>" unless "base",
+    # or "rules") and the number of the repeated run, so runs of several models and repeats share one file
+    advised = {st.name: advisors[st.advisor].name for st in strategies if st.policy == "advised"}
     labels = {k: v for k, v in s.items() if k not in ("y", "F", "base_features", "start")}
     rows = []
     for (name, d), r in runs.items():
         applied = r.get("applied", [])
-        row = dict(labels, strategy=name, detector=d, scale=scale, retrains=r["retrains"],
+        row = dict(labels, strategy=name, detector=d, model=advised.get(name, np.nan),
+                   repeat=repeat if name in advised else np.nan, scale=scale, retrains=r["retrains"],
                    mase_all=mase(y, r["pred"], t_dep, end, scale),
                    mase_pre=mase(y, r["pred"], t_dep, t_chg, scale) if t_chg and t_chg > t_dep else np.nan,
                    mase_post=mase(y, r["pred"], t_chg, end, scale) if t_chg else np.nan,
@@ -312,21 +321,32 @@ def evaluate_series(s: dict, params: dict | None = None, strategies=STRATEGIES, 
     return rows
 
 
+# what the series of each source measures, for the "rich" prompt: no date, no place, no name of the series
+KINDS = {"entsoe": "hourly electricity load of a national grid, in MW",
+         "seismic": "hourly seismic noise level (ground displacement) at one seismic station",
+         "synthetic": "hourly electricity consumption of one client, in kW"}
+
 _WORKER: dict = {}  # advisors of a worker process, created on its first series
 
 
 def _job(s, strategies=STRATEGIES, advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None,
-         detectors: tuple[str, ...] = ()):
-    if advisors and "advisors" not in _WORKER:
+         detectors: tuple[str, ...] = (), repeats: int = 1, prompt: str = "base", effort: str | None = "low"):
+    if advisors and _WORKER.get("key") != (advisors, llm_model, prompt, effort):
         from src.recommendations.llm_client import DEFAULT_MODEL, LLMAdvisor, RuleAdvisor
 
-        made = {"rules": RuleAdvisor, "llm": lambda: LLMAdvisor(llm_model or DEFAULT_MODEL)}
+        made = {"rules": RuleAdvisor, "llm": lambda: LLMAdvisor(llm_model or DEFAULT_MODEL, prompt=prompt, effort=effort)}
         _WORKER["advisors"] = {k: made[k]() for k in advisors}
+        _WORKER["key"] = (advisors, llm_model, prompt, effort)
     mine = None
     if alerts is not None:  # every detector runs on every series; one without alarms on this series gets an empty list
         mine = alerts.get(series_id(s), {})
         mine = {d: mine.get(d, np.array([], dtype=int)) for d in (detectors or sorted(mine))}
-    return evaluate_series(s, LGBM_PARAMS, strategies, _WORKER.get("advisors"), alerts=mine)
+    rows = evaluate_series(s, LGBM_PARAMS, strategies, _WORKER.get("advisors"), alerts=mine)
+    # repeated runs of a non-deterministic advisor: only the advised strategies are run again
+    for r in range(1, repeats if advisors else 1):
+        rows += [row for row in evaluate_series(s, LGBM_PARAMS, strategies, _WORKER.get("advisors"), repeat=r, alerts=mine)
+                 if isinstance(row["model"], str)]
+    return rows
 
 
 def sort_runs(df: pd.DataFrame) -> pd.DataFrame:
@@ -338,11 +358,14 @@ def sort_runs(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_backtests(series: list[dict], processes: int | None = None, log=None, strategies=STRATEGIES,
-                  advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None) -> pd.DataFrame:
-    """`alerts`: alarm positions per series id and detector (see `alarms.read_alerts`) for the alarm strategies."""
+                  advisors: tuple[str, ...] = (), llm_model: str | None = None, alerts: dict | None = None,
+                  repeats: int = 1, prompt: str = "base", effort: str | None = "low") -> pd.DataFrame:
+    """`alerts`: alarm positions per series id and detector (see `alarms.read_alerts`) for the alarm strategies.
+    `repeats`: how many times the advised strategies run (column `repeat`); `prompt`: the prompt variant of the LLM advisor (see `llm_client.PROMPTS`)."""
     rows = []
     detectors = tuple(sorted({d for per in (alerts or {}).values() for d in per}))
-    job = partial(_job, strategies=strategies, advisors=advisors, llm_model=llm_model, alerts=alerts, detectors=detectors)
+    job = partial(_job, strategies=strategies, advisors=advisors, llm_model=llm_model, alerts=alerts, detectors=detectors,
+                  repeats=repeats, prompt=prompt, effort=effort)
     with Pool(processes) as pool:
         for i, rs in enumerate(pool.imap_unordered(job, series, chunksize=1), 1):
             rows.extend(rs)
@@ -378,12 +401,13 @@ def summarize(runs: pd.DataFrame) -> pd.DataFrame:
     r = runs.join(oracle.rename("oracle_post"), on=["source", "series", "scenario"])
     r["regret"] = r.mase_post - r.oracle_post
     r["gain_significant"] = (r.gain_lo > 0).astype(float).where(r.gain_lo.notna())
-    for c in ("decisions", "proposed", "accepted", "check_fits", "detector", "alarms", "acts_pre", "reaction_h"):
-        if c not in r:  # absent in results computed before the acceptance rule or the alarm strategies
+    for c in ("decisions", "proposed", "accepted", "check_fits", "detector", "alarms", "acts_pre", "reaction_h", "model", "repeat"):
+        if c not in r:  # absent in results computed before the acceptance rule, the alarm strategies or the advisors
             r[c] = np.nan
     r["accept_rate"] = r.accepted / r.proposed.fillna(r.decisions).where(lambda x: x > 0)  # share of proposals applied
-    g = r.groupby(["source", "scenario", "strategy", r.detector.fillna("")], sort=False).agg(
-        series=("series", "nunique"), mase_pre=("mase_pre", "mean"), mase_post=("mase_post", "mean"),
+    # means over series and over the repeats of an advisor; `runs` counts rows (series x repeats)
+    g = r.groupby(["source", "scenario", "strategy", r.detector.fillna(""), r.model.fillna("")], sort=False).agg(
+        series=("series", "nunique"), runs=("series", "size"), mase_pre=("mase_pre", "mean"), mase_post=("mase_post", "mean"),
         regret=("regret", "mean"), retrains=("retrains", "mean"), gain_vs_nothing=("gain_vs_nothing", "mean"),
         share_gain_significant=("gain_significant", "mean"), accept_rate=("accept_rate", "mean"),
         check_fits=("check_fits", "mean"), alarms=("alarms", "mean"), acts_pre=("acts_pre", "mean"),

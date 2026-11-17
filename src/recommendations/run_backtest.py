@@ -28,6 +28,7 @@ from src.recommendations.backtester import (ADVISED_STRATEGIES, ALARM_STRATEGIES
                                             run_backtests, sort_runs, summarize, tune_base_model)
 from src.recommendations.data_sources import entsoe_series, seismic_series
 from src.recommendations.forecast import LGBM_PARAMS, WEEK, mase_scale
+from src.recommendations.llm_client import PROMPTS
 from src.recommendations.plots import example_frame
 from src.recommendations.strata import strata_table
 from src.recommendations.synthetic import SYN_DEPLOY_WEEK, fit_models, synthetic_series
@@ -94,7 +95,14 @@ def main():
     p.add_argument("--report", action="store_true", help="rebuild the summaries from runs.csv without recomputing")
     p.add_argument("--advisors", default=None,
                    help="comma-separated advisors (rules, llm): compute only their strategies and replace their rows in runs.csv")
-    p.add_argument("--llm-model", default=None, help='Instructor model string, e.g. "anthropic/claude-haiku-5-5"')
+    p.add_argument("--llm-model", default=None,
+                   help='Instructor model string, provider first, e.g. "openrouter/mistralai/mistral-small" or "ollama/qwen2.5:7b-instruct"')
+    p.add_argument("--repeats", type=int, default=1, help="how many times the advised strategies run (column repeat)")
+    p.add_argument("--llm-reasoning", default="low", choices=["low", "off"],
+                   help='reasoning effort of the LLM advisor: "low" (default) or "off" (no reasoning, where the provider allows it)')
+    p.add_argument("--prompt", default="base", choices=PROMPTS,
+                   help="prompt variant of the LLM advisor: the system prompt alone, with instructions, with instructions and "
+                        "examples, or bare (ablation: no diagnostics); the model name gets |<variant> unless base")
     p.add_argument("--alerts", default=None,
                    help="alerts CSV (see alarms.py): compute only the strategies that review on alarms, once per detector in the "
                         "file (the advised ones for the advisors given), and replace their rows in runs.csv")
@@ -147,12 +155,15 @@ def main():
                 alerts = None
                 strategies = (STRATEGIES[0],) + tuple(st for st in ADVISED_STRATEGIES if st.advisor in advisors)
             new = run_backtests(series, args.processes, log=sys.stderr, strategies=strategies, advisors=advisors,
-                                llm_model=args.llm_model, alerts=alerts)
+                                llm_model=args.llm_model, alerts=alerts, repeats=args.repeats, prompt=args.prompt, effort=args.llm_reasoning)
             new = new[new.strategy.isin([st.name for st in strategies[1:]])]
             prev = pd.read_csv(out / "runs.csv", float_precision="round_trip")
-            if "detector" not in prev:
-                prev["detector"] = float("nan")
+            for c in ("detector", "model", "repeat"):
+                if c not in prev:
+                    prev[c] = float("nan")
+            # rows of the same source, strategy and advisor model are replaced; rows of other models stay
             same = prev.source.isin(new.source.unique()) & prev.strategy.isin(new.strategy.unique())
+            same &= prev.model.isna() | prev.model.isin(new.model.dropna().unique())
             if args.alerts:
                 same &= prev.detector.isin(new.detector.unique())
             runs = sort_runs(pd.concat([prev[~same], new], ignore_index=True))
@@ -166,7 +177,7 @@ def main():
     summ = summarize(runs)
     summ.to_csv(out / "summary.csv", index=False)
     oracle_picks(runs).to_csv(out / "oracle_picks.csv", index=False)
-    write_examples(models, out, real, seismic, recompute=set() if args.report else todo)
+    write_examples(models, out, real, seismic, recompute=set() if (args.report or advisors or args.alerts) else todo)
     print(f"done in {time.time() - t:.0f} s -> {out}")
     print(summ.round(3).to_string(index=False))
 
