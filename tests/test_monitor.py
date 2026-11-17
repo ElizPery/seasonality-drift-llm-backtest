@@ -54,6 +54,25 @@ def test_monitor_played_to_the_end_equals_the_backtest(name):
     assert np.array_equal(m.reference.pred, nothing["pred"], equal_nan=True)
 
 
+@pytest.mark.parametrize("name", ["alarm_retrain", "alarm_gate", "alarm_rules_gate"])
+def test_monitor_with_the_stream_a_detector_equals_the_backtest(name):
+    y, F = toy(shift=20, seed=1)
+    s = series_dict(y, F)
+    st = STRATEGY_BY_NAME[name]
+    advisors = {"rules": RuleAdvisor()}
+    m = Monitor(s, st, detector="residual_conformal", detector_value=1.6, advisors=advisors)
+    while not m.done:
+        m.advance(29)
+    alarms = alarms_in("residual_conformal", y, T_DEPLOY, 1.6)["index"].to_numpy()
+    assert len(alarms) > 0 and m.alarms == alarms[alarms < m.end].tolist()
+    ref = backtest(y, F, T_DEPLOY, st, s["base_features"], advisors=advisors, alarms=alarms, detector="residual_conformal")
+    got = m.run.result(np.asarray(m.alarms))
+    assert np.array_equal(got["pred"], ref["pred"], equal_nan=True)
+    for k in ("retrains", "picks", "decisions", "proposed", "accepted", "check_fits", "applied", "end"):
+        assert got[k] == ref[k], k
+    assert name != "alarm_retrain" or ref["retrains"] > 0  # the alarms did lead to model changes
+
+
 def test_monitor_uses_only_values_read_so_far():
     y, F = toy(shift=20, seed=1)
     s = series_dict(y, F)

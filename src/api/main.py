@@ -27,7 +27,7 @@ from src.api import schemas
 from src.api.sessions import Manager, advisors_for
 from src.monitoring import metrics as M
 from src.recommendations.alarms import DETECTORS, alarms_in
-from src.recommendations.backtester import VAL_WEEKS, check_action
+from src.recommendations.backtester import KINDS, VAL_WEEKS, check_action
 from src.recommendations.catalog import ACTIONS, CATALOG
 from src.recommendations.data_sources import read_series
 from src.recommendations.forecast import DAY, WEEK
@@ -199,7 +199,8 @@ async def recommend(request: Request, req: schemas.RecommendationRequest) -> sch
                 raise ValueError(f"the session needs {VAL_WEEKS} weeks after deployment first")
             st = STRATEGY_BY_NAME["rules_gate" if req.advisor == "rules" else "llm_gate"]
             advisor = advisors_for(st, req.llm_model or session.llm_model)[st.advisor]
-            ctx = diagnostics(s["y"], run.pred, T, t_dep, run.scale, run.last_change)
+            ctx = diagnostics(s["y"], run.pred, T, t_dep, run.scale, run.last_change, history=run.history,
+                              kind=KINDS.get(s.get("source")))
             answer = advisor.recommend(ctx)
             a = ACTIONS[answer.action]
             check = None

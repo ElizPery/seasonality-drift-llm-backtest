@@ -2,6 +2,7 @@
 numpy==2.2.6
 pandas==2.3.3
 scipy==1.15.3
+statsmodels==0.15.0
 lightgbm==4.7.0
 river==0.26.1
 pydantic==2.14.2

@@ -106,22 +106,35 @@ def residual_detector(mult: float = 1.0):
     return ResidualConformalDriftDetector(seasonality_period=DAY, **params)
 
 
-def residual_ratio(window: np.ndarray, local: np.ndarray | None, value: float, alpha: float, var_window: int) -> float:
-    """The three rules of the stream A detector for one position as one number: the largest of its scores divided by
-    their thresholds at multiplier 1, so the position violates the rules at multiplier m exactly when the ratio
-    exceeds m. `window` holds the previous residuals of the calibration window, `local` the last `var_window`
-    residuals including the current one `value` (None while there are too few)."""
+def residual_scores(window: np.ndarray, local: np.ndarray | None, value: float, alpha: float) -> tuple[float, float, float, float]:
+    """The numbers the stream A detector compares at one position, computed as in its `fit_predict`: the deviation
+    of the residual `value` from the median of the calibration `window`, the conformal quantile of the deviations
+    inside the window (its threshold at multiplier 1), the shift of the mean of the `local` window from that median,
+    and the interquartile range of the local window over the one of the calibration window. `local` is None while
+    there are too few residuals for it; the last two rules are then off."""
     med = np.median(window)
     dev = np.abs(window - med)
     q = int(np.clip(int(np.ceil((1.0 - alpha) * (len(dev) + 1))) - 1, 0, len(dev) - 1))
     base = np.sort(dev)[q]
-    ratio = np.abs(value - med) / base
-    if local is not None:
-        mean_ratio = np.abs(np.mean(local) - med) * np.sqrt(var_window) / (1.35 * base)
-        iqr = np.percentile(local, 75) - np.percentile(local, 25)
-        iqr_ratio = iqr / (np.percentile(window, 75) - np.percentile(window, 25) + 1e-8) / 1.8
-        ratio = max(ratio, mean_ratio, iqr_ratio)
-    return float(ratio)
+    score = np.abs(value - med)
+    if local is None:
+        return float(score), float(base), 0.0, 0.0
+    shift = np.abs(np.mean(local) - med)
+    local_iqr = np.percentile(local, 75) - np.percentile(local, 25)
+    baseline_iqr = np.percentile(window, 75) - np.percentile(window, 25)
+    return float(score), float(base), float(shift), float(local_iqr / (baseline_iqr + 1e-8))
+
+
+def residual_violation(score, base, shift, iqr, mult: float, var_window: int):
+    """The three rules of `fit_predict` at multiplier `mult`, with its operations in its order (floats or arrays)."""
+    threshold = base * mult
+    return (score > threshold) | (shift > (threshold / np.sqrt(var_window)) * 1.35) | (iqr > (1.8 * mult))
+
+
+def block_end(i: int, first: int, step: int) -> int:
+    """The last position of the STL block of the stream A detector that holds position `i`: the first `first`
+    positions come from one warm-up fit, the later ones from fits on blocks of `step` positions."""
+    return first - 1 if i < first else first + ((i - first) // step + 1) * step - 1
 
 
 class ResidualStream:
@@ -129,7 +142,7 @@ class ResidualStream:
     residuals of a block of one period come from an STL fit on the history up to the end of that block, then every
     position of the block is checked. An alarm is therefore returned with the last value of its block (`index`),
     with the position that raised it in `detected`. On a whole series it gives the alarms of `fit_predict` that lie
-    in complete blocks (checked in the tests)."""
+    in complete blocks, with the same scores and thresholds (checked in the tests)."""
 
     def __init__(self, mult: float, start: int = 0):
         d = residual_detector(mult)
@@ -140,16 +153,17 @@ class ResidualStream:
             raise ValueError("a block may hold two alarms: the cooldown is shorter than the block")
         self.y: list[float] = []
         self.r: list[float] = []
+        self.checked = d.cal_window  # the next position to check
         self.run, self.last = 0, -d.cooldown_steps
 
     def _check(self, i: int) -> dict | None:
         d, r = self.d, self.r
         local = np.asarray(r[i - d.var_window + 1: i + 1]) if i >= d.cal_window + d.var_window else None
-        ratio = residual_ratio(np.asarray(r[i - d.cal_window: i]), local, r[i], d.alpha, d.var_window)
-        self.run = self.run + 1 if ratio > self.mult else 0
+        score, base, shift, iqr = residual_scores(np.asarray(r[i - d.cal_window: i]), local, r[i], d.alpha)
+        self.run = self.run + 1 if residual_violation(score, base, shift, iqr, self.mult, d.var_window) else 0
         if self.run >= d.min_consecutive and i - self.last >= d.cooldown_steps:
             self.last, self.run = i, 0
-            return dict(detected=i, score=ratio, threshold=self.mult)
+            return dict(detected=i, score=score, threshold=base * self.mult)
         return None
 
     def update(self, value: float) -> dict | None:
@@ -162,48 +176,54 @@ class ResidualStream:
             return None
         if n == self.first:
             self.r = list(STL(np.asarray(self.y), period=d.period, robust=d.robust).fit().resid)
-            return None
-        segment = np.asarray(self.y[max(0, n - self.history):])
-        self.r.extend(STL(segment, period=d.period, robust=d.robust).fit().resid[-d.causal_step:])
-        found = [a for a in (self._check(i) for i in range(n - d.causal_step, n)) if a is not None]
+        else:
+            segment = np.asarray(self.y[max(0, n - self.history):])
+            self.r.extend(STL(segment, period=d.period, robust=d.robust).fit().resid[-d.causal_step:])
+        found = [a for a in (self._check(i) for i in range(self.checked, n)) if a is not None]
+        self.checked = n
         if found and n - 1 >= self.start:
             return dict(index=n - 1, **found[0])
         return None
 
 
-_RATIOS: dict[str, np.ndarray] = {}  # ratios of the series seen so far: the calibration asks for them once per grid value
+_SCORES: dict[str, np.ndarray] = {}  # scores of the series seen last: the calibration asks for them once per grid value
 
 
-def residual_ratios(y: np.ndarray) -> np.ndarray:
-    """`residual_ratio` at every position of `y` (NaN inside the first calibration window), from the causal STL
-    residuals of the stream A detector."""
+def residual_score_table(y: np.ndarray) -> np.ndarray:
+    """`residual_scores` at every position of `y`, one row per position (NaN inside the first calibration window),
+    from the causal STL residuals of the stream A detector."""
     y = np.asarray(y, dtype=float)
     key = hashlib.blake2b(y.tobytes(), digest_size=16).hexdigest()
-    if key not in _RATIOS:
+    if key not in _SCORES:
         d = residual_detector()
         r = d._compute_causal_residuals(y)
-        out = np.full(len(y), np.nan)
+        out = np.full((len(y), 4), np.nan)
         for i in range(d.cal_window, len(y)):
             local = r[i - d.var_window + 1: i + 1] if i >= d.cal_window + d.var_window else None
-            out[i] = residual_ratio(r[i - d.cal_window: i], local, r[i], d.alpha, d.var_window)
-        _RATIOS[key] = out
-    return _RATIOS[key]
+            out[i] = residual_scores(r[i - d.cal_window: i], local, r[i], d.alpha)
+        while len(_SCORES) >= 512:
+            _SCORES.pop(next(iter(_SCORES)))
+        _SCORES[key] = out
+    return _SCORES[key]
 
 
 def residual_conformal_alarms(y: np.ndarray, start: int, mult: float) -> pd.DataFrame:
     """Alarms of the stream A detector on the series `y` at multiplier `mult`, each dated at the end of its STL
-    block (see `ResidualStream`); alarms known before `start` or only after the end of the series are dropped."""
+    block (see `ResidualStream`), with the score and the threshold of `fit_predict`; alarms known before `start`
+    or only after the end of the series are dropped."""
     d = residual_detector(mult)
-    ratio = residual_ratios(y)
+    score, base, shift, iqr = residual_score_table(y).T
+    with np.errstate(invalid="ignore"):
+        viol = residual_violation(score, base, shift, iqr, mult, d.var_window)
     first = max(2 * d.period, d.cal_window)
     out, run, last = [], 0, -d.cooldown_steps
     for i in range(d.cal_window, len(y)):
-        run = run + 1 if ratio[i] > mult else 0
+        run = run + 1 if viol[i] else 0
         if run >= d.min_consecutive and i - last >= d.cooldown_steps:
             last, run = i, 0
-            known = i if i < first else first + ((i - first) // d.causal_step + 1) * d.causal_step - 1
-            if start <= known < len(y):
-                out.append((known, float(ratio[i]), float(mult)))
+            known = block_end(i, first, d.causal_step)
+            if start <= known < len(y) and not (out and out[-1][0] == known):  # one alarm per block
+                out.append((known, float(score[i]), float(base[i] * mult)))
     return pd.DataFrame(out, columns=["index", "score", "threshold"])
 
 

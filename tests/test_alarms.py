@@ -147,15 +147,39 @@ def test_alerts_file_round_trip_and_timestamp_matching(tmp_path):
 
 @pytest.mark.parametrize("mult", [1.0, 1.6, 3.0])
 def test_residual_conformal_alarms_are_those_of_the_stream_a_detector_dated_at_the_block_end(mult):
-    from src.recommendations.alarms import residual_conformal_alarms, residual_detector
+    from src.recommendations.alarms import block_end, residual_conformal_alarms, residual_detector
 
     y, _ = toy(shift=12, seed=3)
     d = residual_detector(mult)
-    hers = np.array([a["index"] for a in d.fit_predict(pd.DataFrame({"value": y}))])
+    hers = d.fit_predict(pd.DataFrame({"value": y}))
     first = max(2 * d.period, d.cal_window)
-    known = first + ((hers - first) // d.causal_step + 1) * d.causal_step - 1  # the last hour of the STL block
-    assert len(hers) > 0 and (known >= hers).all() and (known - hers < d.causal_step).all()
+    known = np.array([block_end(a["index"], first, d.causal_step) for a in hers])  # the last hour of the STL block
+    detected = np.array([a["index"] for a in hers])
+    assert len(hers) > 0 and (known >= detected).all() and (known - detected < d.causal_step).all()
+    inside = known < len(y)  # an alarm of the last, incomplete block is not known by the end of the series
     ours = residual_conformal_alarms(y, 0, mult)
-    assert ours["index"].tolist() == known[known < len(y)].tolist()
+    assert ours["index"].tolist() == known[inside].tolist()
+    assert ours["score"].tolist() == [a["score"] for a, ok in zip(hers, inside) if ok]          # the same floats
+    assert ours["threshold"].tolist() == [a["threshold"] for a, ok in zip(hers, inside) if ok]
     late = residual_conformal_alarms(y, T_DEPLOY, mult)
-    assert late["index"].tolist() == known[(known >= T_DEPLOY) & (known < len(y))].tolist()
+    assert late["index"].tolist() == known[(known >= T_DEPLOY) & inside].tolist()
+
+
+def test_residual_conformal_alarms_do_not_depend_on_later_values():
+    from src.recommendations.alarms import residual_conformal_alarms, residual_detector
+
+    y, _ = toy(shift=12, seed=3)
+    full = residual_conformal_alarms(y, 0, 1.0)["index"].to_numpy()
+    assert len(full) > 3
+    for k in (int(full[1]), int(full[len(full) // 2]), int(full[-2]) + 7, T_CHANGE + 100):
+        cut = residual_conformal_alarms(y[: k + 1], 0, 1.0)["index"].to_numpy()  # only the values up to hour k
+        assert cut.tolist() == full[full <= k].tolist()
+    # why the alarm is dated at the end of its block: inside a block that is not complete yet, the residuals of
+    # the detector still change when the later values of the block arrive
+    d = residual_detector(1.0)
+    first, k = max(2 * d.period, d.cal_window), T_CHANGE + 100
+    complete = first + ((k + 1 - first) // d.causal_step) * d.causal_step
+    assert complete < k + 1
+    r_full, r_cut = d._compute_causal_residuals(y), d._compute_causal_residuals(y[: k + 1])
+    assert np.array_equal(r_cut[:complete], r_full[:complete])
+    assert not np.allclose(r_cut[complete:], r_full[complete: k + 1])

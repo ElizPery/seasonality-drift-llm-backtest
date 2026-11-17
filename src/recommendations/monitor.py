@@ -1,7 +1,7 @@
 """Watching a deployed forecasting model as the data arrive: the engine of the monitoring service (`src.api`).
 
 `Monitor` plays one series hour by hour. At 00:00 of every day the deployed model forecasts the next 24 hours; every
-hour the new value is compared with its forecast and fed to a stand-in drift detector (`alarms.OnlineDetector`); on an
+hour the new value is compared with its forecast and fed to a drift detector (`alarms.OnlineDetector`); on an
 alarm (or on the calendar, for the weekly strategies) the strategy reviews the model: the advisor proposes an action,
 the acceptance rule checks it on the last two weeks, and the action is applied only if the check passes. The decisions
 are taken by `StrategyRun`, the code of the backtest, so a series played to its end gives exactly the numbers of the
@@ -17,7 +17,7 @@ import time
 import numpy as np
 
 from src.recommendations.alarms import OnlineDetector
-from src.recommendations.backtester import ADVISED_STRATEGIES, ALARM_STRATEGIES, STRATEGIES, Strategy, StrategyRun
+from src.recommendations.backtester import ADVISED_STRATEGIES, ALARM_STRATEGIES, KINDS, STRATEGIES, Strategy, StrategyRun
 from src.recommendations.forecast import DAY
 
 STRATEGY_BY_NAME = {st.name: st for st in STRATEGIES + ADVISED_STRATEGIES + ALARM_STRATEGIES}
@@ -39,7 +39,7 @@ class Monitor:
         y, t_dep = s["y"], s["t_deploy"]
         cache: dict = {}  # fits shared by the two runs, as between the strategies of the backtest
         self.run = StrategyRun(y, s["F"], t_dep, strategy, s["base_features"], params, cache=cache, advisors=advisors,
-                               detector=detector)
+                               detector=detector, kind=KINDS.get(s.get("source")))
         self.reference = StrategyRun(y, s["F"], t_dep, STRATEGY_BY_NAME["nothing"], s["base_features"], params, cache=cache)
         self.scale, self.end = self.run.scale, self.run.end
         self.detector = OnlineDetector(detector, detector_value, t_dep) if detector else None
