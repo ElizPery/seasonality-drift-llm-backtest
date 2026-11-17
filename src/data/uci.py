@@ -17,8 +17,10 @@ import pandas as pd
 from src.data.frames import frame_from_series
 
 
-RAW_FILE = Path("../data/raw/LD2011_2014.txt")
-HOURLY_FILE = Path("../data/processed/uci_hourly.parquet")
+# from the repository root, so the files are found from the root (scripts, tests, service) and from notebooks/ alike
+ROOT = Path(__file__).resolve().parents[2]
+RAW_FILE = ROOT / "data/raw/LD2011_2014.txt"
+HOURLY_FILE = ROOT / "data/processed/uci_hourly.parquet"
 WEEK = 168
 
 

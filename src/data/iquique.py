@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from seisbench.data import Iquique
 
 
 def load_iquique_trace(seed: int | None = None) -> tuple[pd.DataFrame, list[int]]:
     """A random trace with valid P and S arrivals, clipped before the S arrival, so the P arrival is the
     single change point. Returns the standard frame and the list with that change point position."""
+    from seisbench.data import Iquique
+
     if seed is not None:
         np.random.seed(seed)
 
@@ -57,6 +58,8 @@ def load_iquique_batch(n_series: int = 5, seed: int | None = None) -> dict[str, 
     """Loads N distinct valid traces from the SeisBench Iquique dataset,
     returning a dictionary of {trace_id: (df, change_points_list)}.
     """
+    from seisbench.data import Iquique
+
     if seed is not None:
         np.random.seed(seed)
 
