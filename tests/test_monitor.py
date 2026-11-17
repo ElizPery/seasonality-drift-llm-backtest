@@ -16,7 +16,8 @@ from tests.test_alarms import series_dict
 from tests.test_backtester import T_CHANGE, T_DEPLOY, toy
 
 
-@pytest.mark.parametrize("method,value", [("profile_conformal", 1.2), ("profile_conformal", 1.0), ("adwin", 0.003)])
+@pytest.mark.parametrize("method,value", [("profile_conformal", 1.2), ("profile_conformal", 1.0), ("adwin", 0.003),
+                                          ("residual_conformal", 1.6), ("residual_conformal", 1.0)])
 def test_online_detector_raises_the_alarms_of_the_batch_detector(method, value):
     y, _ = toy(shift=12, seed=3)
     batch = alarms_in(method, y, T_DEPLOY, value)
@@ -24,7 +25,7 @@ def test_online_detector_raises_the_alarms_of_the_batch_detector(method, value):
     online = [a for a in (det.update(v) for v in y) if a is not None]
     assert [a["index"] for a in online] == batch["index"].tolist()
     assert len(online) > 0
-    if method == "profile_conformal":  # same scores and thresholds, not only the same positions
+    if method in ("profile_conformal", "residual_conformal"):  # same scores and thresholds, not only the same positions
         assert np.array_equal([a["score"] for a in online], batch["score"].to_numpy())
         assert np.array_equal([a["threshold"] for a in online], batch["threshold"].to_numpy())
 

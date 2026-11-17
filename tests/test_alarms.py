@@ -143,3 +143,19 @@ def test_alerts_file_round_trip_and_timestamp_matching(tmp_path):
     back = read_alerts(path, manifest)
     assert np.array_equal(back["entsoe/IT/lockdown_2020"]["m"], [7]) and "nope/x/y" not in back
     assert np.array_equal(back["synthetic/toy/s0/level_shift"]["m"], [5])
+
+
+@pytest.mark.parametrize("mult", [1.0, 1.6, 3.0])
+def test_residual_conformal_alarms_are_those_of_the_stream_a_detector_dated_at_the_block_end(mult):
+    from src.recommendations.alarms import residual_conformal_alarms, residual_detector
+
+    y, _ = toy(shift=12, seed=3)
+    d = residual_detector(mult)
+    hers = np.array([a["index"] for a in d.fit_predict(pd.DataFrame({"value": y}))])
+    first = max(2 * d.period, d.cal_window)
+    known = first + ((hers - first) // d.causal_step + 1) * d.causal_step - 1  # the last hour of the STL block
+    assert len(hers) > 0 and (known >= hers).all() and (known - hers < d.causal_step).all()
+    ours = residual_conformal_alarms(y, 0, mult)
+    assert ours["index"].tolist() == known[known < len(y)].tolist()
+    late = residual_conformal_alarms(y, T_DEPLOY, mult)
+    assert late["index"].tolist() == known[(known >= T_DEPLOY) & (known < len(y))].tolist()

@@ -354,5 +354,6 @@ Prometheus metrics (labels `session`, `series`, `strategy`, `detector`): `drift_
 `drift_api_requests_total`, `drift_api_request_seconds`.
 
 Not yet in the service: the LLM advisor inside the Docker image (the image has no Instructor client; outside Docker the
-`llm` strategies work with `llm_model`), the model registry in MLflow, and the detectors of stream A (the service plays
-the stand-in detectors until their alarms come as a function or a file).
+`llm` strategies work with `llm_model`) and the model registry in MLflow. The detector of stream A runs in the service
+as `residual_conformal` (`ResidualStream` in `alarms.py` feeds it one value at a time; an alarm arrives at the end of
+its STL block, up to 23 hours after the hour that raised it).
