@@ -24,7 +24,7 @@ SID = "synthetic/toy/s0/level_shift"
 def client(tmp_path):
     y, F = toy(shift=20, seed=1)
     write_series([series_dict(y, F)], tmp_path)
-    pd.DataFrame([dict(source="synthetic", method="profile_conformal", param="mult", value=1.2),
+    pd.DataFrame([dict(source="synthetic", method="residual_conformal", param="mult", value=1.6),
                   dict(source="synthetic", method="adwin", param="delta", value=0.003)]).to_csv(tmp_path / "detectors.csv", index=False)
     app.state.manager = Manager(tmp_path, tmp_path / "detectors.csv", database_url="", grafana_url="http://grafana.test")
     with TestClient(app) as c:
@@ -35,17 +35,17 @@ def client(tmp_path):
 def test_session_played_by_hand_gives_the_numbers_of_the_backtest(client):
     c, y, F = client
     assert c.get("/health").json()["series"] == 1
-    r = c.post("/sessions", json=dict(series_id=SID, strategy="alarm_rules_gate", detector="profile_conformal", paused=True,
+    r = c.post("/sessions", json=dict(series_id=SID, strategy="alarm_rules_gate", detector="adwin", paused=True,
                                       skip_to_days_before_change=None))
     assert r.status_code == 201, r.text
     info = r.json()
-    assert info["state"] == "paused" and info["hours_read"] == 0 and info["detector_value"] == 1.2
+    assert info["state"] == "paused" and info["hours_read"] == 0 and info["detector_value"] == 0.003
     assert "var-session=1" in info["grafana_url"]
     info = c.post("/sessions/1/advance", json=dict(hours=len(y))).json()
     assert info["state"] == "done" and info["now"] is None
-    alarms = alarms_in("profile_conformal", y, T_DEPLOY, 1.2)["index"].to_numpy()
+    alarms = alarms_in("adwin", y, T_DEPLOY, 0.003)["index"].to_numpy()
     ref = backtest(y, F, T_DEPLOY, STRATEGY_BY_NAME["alarm_rules_gate"], series_dict(y, F)["base_features"],
-                   advisors={"rules": RuleAdvisor()}, alarms=alarms, detector="profile_conformal")
+                   advisors={"rules": RuleAdvisor()}, alarms=alarms, detector="adwin")
     scale = mase_scale(y[:T_DEPLOY])
     assert info["mase_after_change"]["strategy"] == pytest.approx(mase(y, ref["pred"], T_CHANGE, ref["end"], scale), abs=1e-12)
     assert info["model_changes"] == len(ref["applied"]) and info["alarms"] == len(alarms[alarms < ref["end"]])
@@ -57,11 +57,11 @@ def test_session_played_by_hand_gives_the_numbers_of_the_backtest(client):
     assert rec["proposal"] in {"keep", "retrain_full", "retrain_8w", "retrain_2w", "reweight_1w", "add_profile", "recalibrate_level"}
     assert rec["verdict"]
     text = c.get("/metrics").text
-    assert 'drift_alarms_total{detector="profile_conformal",series="synthetic/toy/s0/level_shift",session="1"' in text
+    assert 'drift_alarms_total{detector="adwin",series="synthetic/toy/s0/level_shift",session="1"' in text
     assert "drift_review_outcomes_total" in text and "drift_api_requests_total" in text
     assert c.delete("/sessions/1").status_code == 204
     assert c.get("/sessions/1").status_code == 404
-    assert 'drift_value{detector="profile_conformal",series="synthetic/toy/s0/level_shift",session="1"' not in c.get("/metrics").text
+    assert 'drift_value{detector="adwin",series="synthetic/toy/s0/level_shift",session="1"' not in c.get("/metrics").text
 
 
 def test_session_plays_in_the_background(client):
@@ -77,8 +77,8 @@ def test_session_plays_in_the_background(client):
 
 def test_detect_on_a_series_and_on_posted_values(client):
     c, y, _ = client
-    got = c.post("/detect", json=dict(series_id=SID, method="profile_conformal")).json()
-    assert [a["index"] for a in got["alarms"]] == alarms_in("profile_conformal", y, T_DEPLOY, 1.2)["index"].tolist()
+    got = c.post("/detect", json=dict(series_id=SID, method="adwin")).json()
+    assert [a["index"] for a in got["alarms"]] == alarms_in("adwin", y, T_DEPLOY, 0.003)["index"].tolist()
     posted = c.post("/detect", json=dict(values=y.tolist(), start="2020-01-06", method="adwin", value=0.003, from_index=T_DEPLOY))
     assert posted.status_code == 200
     assert [a["index"] for a in posted.json()["alarms"]] == alarms_in("adwin", y, T_DEPLOY, 0.003)["index"].tolist()

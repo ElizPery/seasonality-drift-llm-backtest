@@ -38,7 +38,7 @@
     │   │   ├── plots.py            # Figures for the stream B notebook
     │   │   ├── run_backtest.py     # Stream B runner
     │   │   ├── llm_client.py       # Instructor + Pydantic v2 schemas for LLM
-    │   │   ├── alarms.py           # detector alarms: stream A detector and two stand-ins (batch and online), alerts file
+    │   │   ├── alarms.py           # detector alarms: stream A detector and ADWIN (batch and online), alerts file
     │   │   └── monitor.py          # Monitor: the decision loop as the data arrive (engine of the service)
     │   │
     │   ├── api/                    # MLOps microservice
@@ -248,17 +248,17 @@ of false alarms or of a fixed calendar) and `reaction_h` (hours from the change 
 The detector of stream A runs on these series as `residual_conformal`: `ResidualConformalDriftDetector` of
 `src/detector` with the settings of its multi-series mode for a daily period. Its residual of an hour comes from an STL
 fit on a block that ends up to 23 hours later, so an alarm is dated at the end of its block, the first hour at which it
-is known (the tests check that the alarms are those of its `fit_predict` and do not depend on later values). Two
-stand-in detectors run next to it for comparison, both using only the past: `profile_conformal` (the residual of each
-hour from the median of the same hour of the last 4 weeks, a conformal threshold on the last 2 weeks of residuals, two
-consecutive violations, one-day cooldown) and `adwin` (ADWIN on the same residuals). The sensitivity of every detector
+is known (the tests check that the alarms are those of its `fit_predict` and do not depend on later values). ADWIN
+(`adwin`) runs next to it as the reference detector, on the residual of each hour from the median of the same hour of
+the last 4 weeks, which uses only the past. A conformal stand-in on the same residuals (`profile_conformal`) served
+until the stream A detector was connected and has been removed. The sensitivity of every detector
 is calibrated per source on a control period without changes (the 60 synthetic control series; the seismic weeks
 between deployment and the first measures; the year 2019 of the national load) to one false alarm per 14 days (2.98 per
 1000 hours): settings calibrated on one source do not carry over to another. `data/alerts/detectors.csv` records the
 chosen settings and the false alarm rate reached: `residual_conformal` gets the multiplier 8 on the national load (1.99
 per 1000 hours) and on the seismic noise (3.04, the strictest value of its grid, just above the target) and 4 on the
 synthetic series (2.90); ADWIN does not reach the target on the national load even at its strictest setting (8.30).
-`data/alerts/alerts.csv` holds the alarms of the three detectors (kept in git).
+`data/alerts/alerts.csv` holds the alarms of both detectors (kept in git).
 
 Data: 240 synthetic series (20 UCI clients x 3 seeds x {no change, level shift 2 sigma, one-week ramp 2 sigma,
 noise x2}, 24 weeks, deployment at week 10, change at week 13), the national load of 8 countries (dataset 5,
@@ -314,7 +314,7 @@ above 0. A second run of `nothing` on the same series shows the error the model 
 The decisions are taken by the code of the backtest (`StrategyRun` in `backtester.py`, the loop that `backtest` also
 drives), and the detectors run one value at a time (`OnlineDetector` in `alarms.py`) with the alarms of the
 batch functions. A series played to its end therefore gives the numbers of `runs.csv`: for example, the national load
-of Portugal under `alarm_rules_gate` with `profile_conformal` ends with 9 alarms, 6 reviews, no model change and MASE
+of Portugal under `alarm_rules_gate` with `residual_conformal` ends with 4 alarms, 4 reviews, no model change and MASE
 after the change 0.7548643518593062, the value in `runs.csv`. `tests/test_monitor.py` and `tests/test_api.py` check
 this on a small series.
 
@@ -330,7 +330,7 @@ this on a small series.
 python -m src.data.export                 # once: the series the service plays, in data/processed/series
 docker compose up --build -d              # API http://localhost:8000/docs, Grafana http://localhost:3000, Prometheus :9090
 curl -X POST localhost:8000/sessions -H 'content-type: application/json' \
-     -d '{"series_id": "seismic/IV.MILN/lockdown_2020", "strategy": "alarm_rules_gate", "detector": "profile_conformal", "speed": 12}'
+     -d '{"series_id": "seismic/IV.MILN/lockdown_2020", "strategy": "alarm_rules_gate", "detector": "residual_conformal", "speed": 12}'
                                           # the answer has `grafana_url`: the dashboard of this session around the change
 docker compose down                       # stop (add -v to delete the history)
 uvicorn src.api.main:app --port 8000      # or without Docker: no history for Grafana, the API and the metrics stay
@@ -349,7 +349,7 @@ and both forecasts, the error over the last 7 days, the alarms and reviews as ma
 gain and its interval. **Drift service** shows the live service metrics: requests and latency, sessions, hours read
 per second, reviews by outcome, time of a review, model fits for actions and for checks, CPU and memory.
 
-![Drift monitor: the seismic noise of Milan in 2020 played with alarm_rules_gate and the profile_conformal detector](docs/images/grafana_drift_monitor_milan.png)
+![Drift monitor: the seismic noise of Milan in 2020 played with alarm_rules_gate (screenshot taken with the conformal stand-in detector used before the stream A detector was connected)](docs/images/grafana_drift_monitor_milan.png)
 
 ![Drift service: live metrics of the service while two sessions play](docs/images/grafana_drift_service.png)
 
