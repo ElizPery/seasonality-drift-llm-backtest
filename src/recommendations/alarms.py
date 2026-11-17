@@ -23,12 +23,14 @@ same false alarm rate. Settings calibrated on one source do not carry over to an
 the synthetic settings gave 6 times the target rate on the national load), hence the calibration per source.
 
     python -m src.recommendations.alarms        # calibrate, run all on all series, write data/alerts/alerts.csv
+                                                # (about 18 minutes on 8 cores: the STL fits of the stream A detector)
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import time
+from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
@@ -189,11 +191,28 @@ class ResidualStream:
 _SCORES: dict[str, np.ndarray] = {}  # scores of the series seen last: the calibration asks for them once per grid value
 
 
+def _series_key(y: np.ndarray) -> str:
+    return hashlib.blake2b(np.asarray(y, dtype=float).tobytes(), digest_size=16).hexdigest()
+
+
+def warm_residual_scores(ys: list[np.ndarray], processes: int | None = None) -> None:
+    """Score tables of the stream A detector for many series, computed in parallel processes and kept for the
+    calls that follow: the STL fits take most of the time of a run (about 1 ms per hour of data on one core)."""
+    todo = {_series_key(y): np.asarray(y, dtype=float) for y in ys}
+    todo = sorted((y for k, y in todo.items() if k not in _SCORES), key=len, reverse=True)
+    if not todo:
+        return
+    with Pool(processes) as pool:
+        tables = pool.map(residual_score_table, todo, chunksize=1)
+    for y, table in zip(todo, tables):
+        _SCORES[_series_key(y)] = table
+
+
 def residual_score_table(y: np.ndarray) -> np.ndarray:
     """`residual_scores` at every position of `y`, one row per position (NaN inside the first calibration window),
     from the causal STL residuals of the stream A detector."""
     y = np.asarray(y, dtype=float)
-    key = hashlib.blake2b(y.tobytes(), digest_size=16).hexdigest()
+    key = _series_key(y)
     if key not in _SCORES:
         d = residual_detector()
         r = d._compute_causal_residuals(y)
@@ -399,12 +418,14 @@ def main():
     p.add_argument("--seeds", type=int, default=3)
     p.add_argument("--no-real", action="store_true")
     p.add_argument("--target-days", type=int, default=TARGET_DAYS, help="calibration target: one false alarm per this many days")
+    p.add_argument("--processes", type=int, default=None, help="processes for the STL fits of the stream A detector (default: all cores)")
     args = p.parse_args()
 
     t = time.time()
     series = [] if args.no_real else entsoe_series(str(ENTSOE_FILE)) + seismic_series(str(SEISMIC_DIR))
     series += synthetic_series(fit_models(args.clients), list(range(args.seeds)))
     windows = control_windows(series, None if args.no_real else ENTSOE_FILE)
+    warm_residual_scores([s["y"] for s in series] + [y for w in windows.values() for y, _, _ in w], args.processes)
     params, rows = {}, []
     for source, w in windows.items():
         params[source] = {}
