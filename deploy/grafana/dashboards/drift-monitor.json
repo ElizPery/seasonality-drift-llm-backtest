@@ -1,0 +1,739 @@
+{
+  "uid": "drift-monitor",
+  "title": "Drift monitor",
+  "tags": [
+    "drift",
+    "stream B"
+  ],
+  "timezone": "utc",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "Drift service",
+      "type": "link",
+      "url": "/d/drift-service/drift-service",
+      "icon": "dashboard"
+    }
+  ],
+  "time": {
+    "from": "2020-02-15T00:00:00.000Z",
+    "to": "2020-04-30T00:00:00.000Z"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "session",
+        "label": "Session",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "drift-history"
+        },
+        "query": "SELECT id AS __value, label AS __text FROM sessions ORDER BY id DESC",
+        "definition": "SELECT id AS __value, label AS __text FROM sessions ORDER BY id DESC",
+        "refresh": 1,
+        "includeAll": false,
+        "multi": false,
+        "sort": 0,
+        "current": {},
+        "options": []
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "name": "Detector alarms",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "drift-history"
+        },
+        "enable": true,
+        "iconColor": "red",
+        "target": {
+          "refId": "Alarms",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "drift-history"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT ts AS time, 'alarm of ' || method AS text, 'alarm' AS tags FROM alarms WHERE session_id = $session AND $__timeFilter(ts)",
+          "format": "table"
+        }
+      },
+      {
+        "name": "Model changed",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "drift-history"
+        },
+        "enable": true,
+        "iconColor": "green",
+        "target": {
+          "refId": "Applied",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "drift-history"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT ts AS time, summary AS text, 'model changed' AS tags FROM reviews WHERE session_id = $session AND outcome = 'applied' AND $__timeFilter(ts)",
+          "format": "table"
+        }
+      },
+      {
+        "name": "Reviewed, model kept",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "drift-history"
+        },
+        "enable": true,
+        "iconColor": "yellow",
+        "target": {
+          "refId": "Kept",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "drift-history"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT ts AS time, summary AS text, outcome AS tags FROM reviews WHERE session_id = $session AND outcome <> 'applied' AND $__timeFilter(ts)",
+          "format": "table"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "How to read this dashboard",
+      "description": "",
+      "datasource": null,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 4
+      },
+      "targets": [],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "A **session** plays an hourly series from the deployment of the forecasting model; times are on the clock of the series. Every day at 00:00 the model forecasts the next 24 hours. On a detector **alarm** (red marks) the strategy reviews the model: an advisor proposes an action, the **acceptance check** replays it on the last two weeks, and it is applied only if the lower bound of the 95% interval of the gain is above 0 (green marks: model changed; yellow: reviewed, model kept). Sessions are started in the API (http://localhost:8000/docs); live service metrics are on the dashboard Drift service."
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Last hour read (series clock)",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "drift-history"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "drift-history"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT to_char(max(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI') AS \"last hour read\" FROM points WHERE session_id = $session",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^last hour read$/",
+          "values": false
+        },
+        "colorMode": "none",
+        "textMode": "value",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Alarms, reviews and model changes",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "drift-history"
+      },
+      "gridPos": {
+        "x": 5,
+        "y": 4,
+        "w": 10,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "drift-history"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT (SELECT count(*) FROM alarms WHERE session_id = $session) AS \"alarms\", (SELECT count(*) FROM reviews WHERE session_id = $session) AS \"reviews\", (SELECT count(*) FROM reviews WHERE session_id = $session AND outcome = 'applied') AS \"model changes\", (SELECT count(*) FROM reviews WHERE session_id = $session AND outcome = 'rejected') AS \"rejected by the check\", (SELECT coalesce(sum(check_fits), 0) FROM reviews WHERE session_id = $session) AS \"fits for the checks\"",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "textMode": "value_and_name",
+        "orientation": "vertical"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "MASE after the change",
+      "description": "Mean absolute error after the change of the series, in units of the weekly seasonal naive error on the training data.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "drift-history"
+      },
+      "gridPos": {
+        "x": 15,
+        "y": 4,
+        "w": 9,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "drift-history"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT avg(p.error) AS \"strategy\", avg(p.error_nothing) AS \"model left as deployed\" FROM points p JOIN sessions s ON s.id = p.session_id WHERE p.session_id = $session AND p.ts >= s.change_at",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1.0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Series and day-ahead forecasts",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "drift-history"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "drift-history"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT ts AS time, value AS \"value\", forecast AS \"forecast of the strategy\", forecast_nothing AS \"forecast of the model left as deployed\" FROM points WHERE session_id = $session AND $__timeFilter(ts) ORDER BY ts",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "value"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8c8c8c"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "forecast of the strategy"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3274D9"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "forecast of the model left as deployed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#E0752D"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Forecast error over the last 7 days (MASE)",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "drift-history"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "drift-history"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT ts AS time, avg(error) OVER w AS \"strategy\", avg(error_nothing) OVER w AS \"model left as deployed\" FROM points WHERE session_id = $session AND $__timeFilter(ts) WINDOW w AS (ORDER BY ts ROWS BETWEEN 167 PRECEDING AND CURRENT ROW) ORDER BY ts",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 3
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "strategy"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3274D9"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "model left as deployed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#E0752D"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Reviews of the model: proposal, check, decision",
+      "description": "Gain = MASE of the current model minus MASE of the proposed action on the two weeks before the review; the bounds are its 95% moving block bootstrap interval.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "drift-history"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "drift-history"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT ts AS \"time\", trigger, outcome, proposal, action, round(gain::numeric, 3) AS \"gain\", round(lower_bound::numeric, 3) AS \"lower bound\", round(upper_bound::numeric, 3) AS \"upper bound\", fits, check_fits AS \"check fits\", round(seconds::numeric, 2) AS \"seconds\", summary FROM reviews WHERE session_id = $session ORDER BY ts DESC",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "time"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "time:YYYY-MM-DD HH:mm"
+              },
+              {
+                "id": "custom.width",
+                "value": 140
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "applied": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "rejected": {
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "keep": {
+                        "color": "text",
+                        "index": 2
+                      },
+                      "skipped": {
+                        "color": "text",
+                        "index": 3
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "summary"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 700
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "id": 8,
+      "type": "bargauge",
+      "title": "Outcome of the reviews",
+      "description": "applied: the check confirmed a gain and the action was applied; rejected: the check did not confirm it; keep: no change proposed; skipped: fewer than two weeks of own forecasts to check against.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "drift-history"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "drift-history"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT outcome AS metric, count(*) AS value FROM reviews WHERE session_id = $session GROUP BY outcome ORDER BY outcome",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "namePlacement": "left"
+      }
+    },
+    {
+      "id": 9,
+      "type": "bargauge",
+      "title": "Actions proposed and applied",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "drift-history"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 36,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "drift-history"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT coalesce(proposal, 'none passed the check') || CASE WHEN outcome = 'applied' THEN ', applied' ELSE ', not applied' END AS metric, count(*) AS value FROM reviews WHERE session_id = $session AND outcome <> 'skipped' GROUP BY 1 ORDER BY 2 DESC",
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "purple"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "namePlacement": "left"
+      }
+    }
+  ]
+}

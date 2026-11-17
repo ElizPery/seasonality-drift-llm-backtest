@@ -47,16 +47,23 @@ def profile_residuals(y: np.ndarray, weeks: int = PROFILE_WEEKS) -> np.ndarray:
     return y - np.median(past, axis=0)
 
 
+def conformal_scores(r: np.ndarray, mult: float, calib: int = CALIB, alpha: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
+    """Score and threshold of the conformal rule at every position of the residuals `r`: the deviation of the residual
+    from the median of the previous `calib` residuals, and `mult` times the (1 - alpha) quantile of the previous
+    deviations. Both use only earlier positions, so the values at position i depend on r[i - 2 calib .. i] only."""
+    s = pd.Series(r)
+    med = s.rolling(calib, min_periods=calib // 2).median().shift(1)
+    dev = (s - med).abs()
+    thr = dev.rolling(calib, min_periods=calib // 2).quantile(1 - alpha).shift(1) * mult
+    return dev.to_numpy(), thr.to_numpy()
+
+
 def conformal_alarms(r: np.ndarray, start: int, mult: float, calib: int = CALIB, alpha: float = 0.05,
                      consecutive: int = 2, cooldown: int = DAY) -> pd.DataFrame:
     """Alarms of the conformal rule on residuals `r` from position `start` on: deviation of the residual from
     the median of the previous `calib` residuals against `mult` times the (1 - alpha) quantile of the previous
     deviations. Returns the positions with their score and threshold."""
-    s = pd.Series(r)
-    med = s.rolling(calib, min_periods=calib // 2).median().shift(1)
-    dev = (s - med).abs()
-    thr = dev.rolling(calib, min_periods=calib // 2).quantile(1 - alpha).shift(1) * mult
-    score, thr = dev.to_numpy(), thr.to_numpy()
+    score, thr = conformal_scores(r, mult, calib, alpha)
     viol = (score > thr) & np.isfinite(thr)
     out, run, last = [], 0, -cooldown
     for i in range(start, len(r)):
@@ -91,6 +98,58 @@ def alarms_in(method: str, y: np.ndarray, start: int, value: float) -> pd.DataFr
 
 def alarms_of(method: str, s: dict, value: float) -> pd.DataFrame:
     return alarms_in(method, s["y"], s["t_deploy"], value)
+
+
+class OnlineDetector:
+    """A stand-in detector fed one value at a time, for the monitoring service. It raises the same alarms as
+    `alarms_in(method, y, start, value)` on the whole series (checked in the tests): the profile residual of a new
+    value needs the same hour of the last `PROFILE_WEEKS` weeks, the conformal rule the last 2 `CALIB` residuals,
+    and ADWIN keeps its own state. Values before `start` only build up that history."""
+
+    def __init__(self, method: str, value: float, start: int, weeks: int = PROFILE_WEEKS, calib: int = CALIB,
+                 consecutive: int = 2, cooldown: int = DAY):
+        if method not in DETECTORS:
+            raise ValueError(f"unknown detector {method}; known: {', '.join(DETECTORS)}")
+        self.method, self.value, self.start, self.weeks, self.calib = method, value, start, weeks, calib
+        self.consecutive, self.cooldown = consecutive, cooldown
+        self.y: list[float] = []
+        self.r: list[float] = []
+        self.run, self.last = 0, -cooldown  # state of the conformal rule (see `conformal_alarms`)
+        self.adwin = None
+
+    def update(self, value: float) -> dict | None:
+        """Add the next value of the series; returns the alarm at its position (index, score, threshold) or None."""
+        i = len(self.y)
+        self.y.append(float(value))
+        past = [self.y[i - k * WEEK] for k in range(1, self.weeks + 1)] if i >= self.weeks * WEEK else [np.nan]
+        r = self.y[i] - float(np.median(past))
+        self.r.append(r)
+        if self.method == "adwin":
+            if self.adwin is None:
+                if not np.isfinite(r):
+                    return None
+                from river import drift
+
+                self.adwin = drift.ADWIN(delta=self.value, clock=1)
+            self.adwin.update(r)
+            if self.adwin.drift_detected and i >= self.start:
+                return dict(index=i, score=float(self.adwin.estimation), threshold=np.nan)
+            return None
+        if i < self.start:
+            return None
+        tail = np.asarray(self.r[max(0, i - 2 * self.calib):], dtype=float)
+        score, thr = (float(v[-1]) for v in conformal_scores(tail, self.value, self.calib))
+        self.run = self.run + 1 if (score > thr and np.isfinite(thr)) else 0
+        if self.run >= self.consecutive and i - self.last >= self.cooldown:
+            self.last = i
+            return dict(index=i, score=score, threshold=thr)
+        return None
+
+
+def detector_settings(path: str | Path = ALERTS_DIR / "detectors.csv") -> dict[str, dict[str, float]]:
+    """Calibrated setting of every stand-in detector per source, as written by `main` (source -> method -> value)."""
+    df = pd.read_csv(path)
+    return {src: dict(zip(g["method"], g["value"].astype(float))) for src, g in df.groupby("source")}
 
 
 def control_windows(series: list[dict], entsoe_path: str | Path | None = None) -> dict[str, list[tuple]]:

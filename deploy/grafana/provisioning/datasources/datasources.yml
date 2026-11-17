@@ -1,0 +1,22 @@
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: drift-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 5s
+  - name: History
+    uid: drift-history
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: db:5432
+    user: drift
+    jsonData:
+      database: drift
+      sslmode: disable
+      postgresVersion: 1500
+    secureJsonData:
+      password: drift

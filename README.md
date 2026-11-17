@@ -37,23 +37,29 @@
     │   │   ├── data_sources.py     # ENTSO-E and seismic noise series with features and labels (loaders in src/data)
     │   │   ├── plots.py            # Figures for the stream B notebook
     │   │   ├── run_backtest.py     # Stream B runner
-    │   │   └── llm_client.py       # Instructor + Pydantic v2 schemas for LLM
+    │   │   ├── llm_client.py       # Instructor + Pydantic v2 schemas for LLM
+    │   │   ├── alarms.py           # stand-in detectors (batch and online), alerts file
+    │   │   └── monitor.py          # Monitor: the decision loop as the data arrive (engine of the service)
     │   │
     │   ├── api/                    # MLOps microservice
     │   │   ├── __init__.py
-    │   │   ├── main.py             # FastAPI application (/detect, /recommendations endpoints)
+    │   │   ├── main.py             # FastAPI application (sessions, /detect, /recommendations, /metrics)
+    │   │   ├── sessions.py         # sessions playing a series in the background
+    │   │   ├── store.py            # history of the sessions in PostgreSQL (for Grafana)
     │   │   └── schemas.py          # Pydantic schemas for API requests/responses
     │   │
     │   └── monitoring/             # Infrastructure integration
     │       ├── __init__.py
-    │       └── metrics.py          # Prometheus metrics (prom_client)
+    │       └── metrics.py          # Prometheus metrics (prometheus_client)
     │
     ├── tests/                      # Automated tests (Pytest)
     │   ├── test_detector.py
     │   └── test_backtester.py
     │
-    ├── docker-compose.yml          # Local deployment (FastAPI, MLflow, Prometheus, Grafana)
+    ├── deploy/                     # Prometheus configuration, Grafana data sources and dashboards
+    ├── docker-compose.yml          # Local deployment (FastAPI, PostgreSQL, Prometheus, Grafana)
     ├── Dockerfile                  # FastAPI service containerization
+    ├── requirements-service.txt    # Dependencies of the service image
     ├── requirements.txt            # Python 3.11+ dependencies
     └── README.md                   # Project description and setup instructions
 ```
@@ -222,9 +228,14 @@ LLM recommendations (`llm_client.py`): at a decision point the advisor gets diag
 it (weekly errors of the deployed model, bias, level, daily amplitude and noise changes, weeks since the last change)
 and answers with one catalog action and a short reason (Pydantic schema, validated by Instructor in JSON mode).
 Strategies `llm` (applied as proposed) and `llm_gate` (applied only if the acceptance rule confirms it); `rules` and
-`rules_gate` use fixed rules on the same diagnostics. Every LLM answer is stored in
-`data/llm_answers/` (kept in git), so a rerun reads the stored answers and needs no API key. The key is read from
-`~/.config/diploma/anthropic.env` (one line `ANTHROPIC_API_KEY=...`, another path can be set in `LLM_KEY_FILE`).
+`rules_gate` use fixed rules on the same diagnostics. Five prompt variants (`--prompt`): `base` (the system prompt
+with the catalog and the diagnostics), `instructions` (plus how to read the diagnostics and when each action fits),
+`examples` (plus four worked decisions from a synthetic series that is not evaluated) and `bare` (ablation: no
+diagnostics). Every LLM answer is stored locally in `data/llm_answers/` (not in git; the answers of the reported
+runs are kept as a separate archive), so a rerun with that folder in place reads the stored answers and needs no API
+key. The model string names the provider first (`openrouter/...`, `anthropic/...`, `ollama/...`);
+the key is read from `~/.config/diploma/<provider>.env`, one line `<PROVIDER>_API_KEY=...` (another folder can be
+set in `LLM_KEY_DIR`).
 
 Decisions on detector alarms (`alarms.py`, the link with stream A): the strategies `alarm_retrain`, `alarm_gate`,
 `alarm_catalog_gate`, `alarm_oracle`, `alarm_rules`, `alarm_rules_gate`, `alarm_llm` and `alarm_llm_gate` take the
@@ -255,9 +266,16 @@ python -m src.recommendations.run_backtest --tune            # base model valida
 python -m src.recommendations.run_backtest                   # all sources, about 40 minutes on 16 cores
 python -m src.recommendations.run_backtest --sources seismic # recompute one source, keep the other rows
 python -m src.recommendations.run_backtest --advisors rules  # add the advised strategies (rules, llm) to runs.csv
+python -m src.recommendations.run_backtest --advisors llm --llm-model ollama/qwen2.5:7b-instruct --prompt examples --repeats 3
+                                                             # LLM strategies with one model and one prompt variant
 python -m src.recommendations.alarms                         # stand-in detectors: calibrate, write data/alerts/alerts.csv
 python -m src.recommendations.run_backtest --alerts data/alerts/alerts.csv --advisors rules
                                                              # add the strategies that review on alarms, per detector
+python -m src.recommendations.llm_report                     # LLM advisors on the real series: paired tests against the
+                                                             # reference strategies, shares of the chosen actions and the
+                                                             # figure of error against retrainings (docs/images)
+python -m src.recommendations.prompt_probe                   # probe of the prompt wording: the same diagnostics with a system
+                                                             # message that states the goal and the costs (data/llm_probe)
 python -m pytest tests                                       # tests
 ```
 
@@ -277,3 +295,64 @@ against the weekly oracle). The groups are the national load, the seismic noise,
 scenario; the ranking contains the 17 deployable strategies, the oracles and the seasonal naive forecast are
 references. `notebooks/05_stream_b_statistical_tests.ipynb` reads `runs.csv` and shows the tables and the critical
 difference diagrams.
+
+## Monitoring Service (`src/api`, `src/monitoring`, Docker)
+
+The service runs the decision loop of stream B on a deployed model as the data arrive. A **session** plays one
+exported series hour by hour from the deployment of the model: every day at 00:00 the model forecasts the next 24
+hours, each new value is compared with its forecast and fed to a drift detector, and on an alarm (or on the calendar,
+for the weekly strategies) the strategy reviews the model: the advisor proposes a catalog action, the acceptance rule
+replays it on the last two weeks, and the action is applied only if the lower bound of the 95% interval of the gain is
+above 0. A second run of `nothing` on the same series shows the error the model would have without any change.
+
+The decisions are taken by the code of the backtest (`StrategyRun` in `backtester.py`, the loop that `backtest` also
+drives), and the stand-in detectors run one value at a time (`OnlineDetector` in `alarms.py`) with the alarms of the
+batch functions. A series played to its end therefore gives the numbers of `runs.csv`: for example, the national load
+of Portugal under `alarm_rules_gate` with `profile_conformal` ends with 9 alarms, 6 reviews, no model change and MASE
+after the change 0.7548643518593062, the value in `runs.csv`. `tests/test_monitor.py` and `tests/test_api.py` check
+this on a small series.
+
+- `src/recommendations/monitor.py`: `Monitor`, the engine of a session (no web code).
+- `src/api/main.py`: FastAPI application; `sessions.py` (sessions playing in the background), `store.py` (history
+  in PostgreSQL for Grafana), `schemas.py` (requests and answers).
+- `src/monitoring/metrics.py`: Prometheus metrics, served at `/metrics/`.
+- `docker-compose.yml`, `Dockerfile`, `requirements-service.txt`: the API, PostgreSQL, Prometheus and Grafana;
+  `deploy/` holds the Prometheus configuration and the provisioned Grafana data sources and dashboards.
+
+#### Run:
+```bash
+python -m src.data.export                 # once: the series the service plays, in data/processed/series
+docker compose up --build -d              # API http://localhost:8000/docs, Grafana http://localhost:3000, Prometheus :9090
+curl -X POST localhost:8000/sessions -H 'content-type: application/json' \
+     -d '{"series_id": "seismic/IV.MILN/lockdown_2020", "strategy": "alarm_rules_gate", "detector": "profile_conformal", "speed": 12}'
+                                          # the answer has `grafana_url`: the dashboard of this session around the change
+docker compose down                       # stop (add -v to delete the history)
+uvicorn src.api.main:app --port 8000      # or without Docker: no history for Grafana, the API and the metrics stay
+```
+
+Endpoints: `GET /series`, `GET /strategies` (strategies, detectors, calibrated settings, catalog), `POST /sessions`
+(series, strategy, detector, `speed` in hours of data per second, `skip_to_days_before_change`, `paused`),
+`GET /sessions`, `GET|PATCH|DELETE /sessions/{id}` (state, errors, counters; speed and pause),
+`POST /sessions/{id}/advance` (read hours at once), `GET /sessions/{id}/reviews` (every review: trigger, proposal and
+reason of the advisor, checks with gain and interval, action, time taken), `POST /recommendations` (what the advisor
+proposes now and whether the check confirms it, without applying it), `POST /detect` (alarms of a stand-in detector on
+an exported series or on posted values), `GET /health`, `GET /metrics/`.
+
+Grafana (anonymous view, admin/admin to edit): **Drift monitor** shows a session on the clock of the series: the values
+and both forecasts, the error over the last 7 days, the alarms and reviews as marks, and the table of reviews with the
+gain and its interval. **Drift service** shows the live service metrics: requests and latency, sessions, hours read
+per second, reviews by outcome, time of a review, model fits for actions and for checks, CPU and memory.
+
+![Drift monitor: the seismic noise of Milan in 2020 played with alarm_rules_gate and the profile_conformal detector](docs/images/grafana_drift_monitor_milan.png)
+
+![Drift service: live metrics of the service while two sessions play](docs/images/grafana_drift_service.png)
+
+Prometheus metrics (labels `session`, `series`, `strategy`, `detector`): `drift_hours_read_total`, `drift_value`,
+`drift_forecast{model}`, `drift_mase_7d{model}`, `drift_series_time_seconds`, `drift_alarms_total`,
+`drift_reviews_total{trigger}`, `drift_review_outcomes_total{outcome}`, `drift_model_fits_total{purpose}`,
+`drift_model_changes`, `drift_last_check_lower_bound`, `drift_review_seconds`, `drift_sessions{state}`,
+`drift_api_requests_total`, `drift_api_request_seconds`.
+
+Not yet in the service: the LLM advisor inside the Docker image (the image has no Instructor client; outside Docker the
+`llm` strategies work with `llm_model`), the model registry in MLflow, and the detectors of stream A (the service plays
+the stand-in detectors until their alarms come as a function or a file).
