@@ -1,10 +1,10 @@
-"""Tests of the alarm strategies (review on detector alarms) and of the stand-in detectors and alerts file."""
+"""Tests of the alarm strategies (review on detector alarms), of the detectors and of the alerts file."""
 import numpy as np
 import pandas as pd
 import pytest
 
 from src.data.frames import series_table
-from src.recommendations.alarms import (DETECTORS, adwin_alarms, calibrate, conformal_alarms, control_windows, detect_all,
+from src.recommendations.alarms import (DETECTORS, adwin_alarms, calibrate, control_windows, detect_all,
                                         false_alarm_rate, profile_residuals, read_alerts)
 from src.recommendations.backtester import ALARM_STRATEGIES, STRATEGIES, backtest, evaluate_series
 from src.recommendations.forecast import BASE_FEATURES, DAY, WEEK
@@ -73,23 +73,17 @@ def test_job_runs_every_detector_on_every_series_even_without_alarms():
     assert sorted(on.index) == ["a", "b"] and on.loc["b", "retrains"] == 0 and on.loc["a", "retrains"] == 1
 
 
-def test_profile_conformal_uses_only_the_past_and_fires_after_a_shift():
-    y, F = toy(shift=40)
+def test_profile_residuals_use_only_the_past():
+    y, _ = toy(shift=40)
     r = profile_residuals(y)
     assert np.isnan(r[: 4 * WEEK]).all() and np.isfinite(r[4 * WEEK :]).all()
-    alarms = conformal_alarms(r, T_DEPLOY, mult=2.0)
-    after = alarms["index"][alarms["index"] >= T_CHANGE]
-    assert len(after) > 0 and after.min() - T_CHANGE < 2 * DAY
-    assert (alarms["score"] > alarms["threshold"]).all()
-    assert (np.diff(alarms["index"].to_numpy()) >= DAY).all()  # one-day cooldown
     y2 = y.copy()
     y2[T_CHANGE + DAY :] += 1000.0
-    alarms2 = conformal_alarms(profile_residuals(y2), T_DEPLOY, mult=2.0)
     cut = T_CHANGE + DAY
-    assert alarms[alarms["index"] < cut].equals(alarms2[alarms2["index"] < cut])
+    assert np.array_equal(profile_residuals(y2)[:cut], r[:cut], equal_nan=True)
 
 
-def test_adwin_stand_in_fires_after_a_shift():
+def test_adwin_fires_after_a_shift():
     pytest.importorskip("river")
     y, F = toy(shift=40)
     alarms = adwin_alarms(profile_residuals(y), T_DEPLOY, delta=0.002)
@@ -97,16 +91,19 @@ def test_adwin_stand_in_fires_after_a_shift():
     assert len(after) > 0 and after.min() - T_CHANGE < 3 * DAY
 
 
-def test_calibration_meets_the_target_false_alarm_rate_on_control_windows():
+@pytest.mark.parametrize("method,sensitive,setting", [("residual_conformal", 1.0, 2.0), ("adwin", 0.3, 0.002)])
+def test_calibration_meets_the_target_false_alarm_rate_on_control_windows(method, sensitive, setting):
+    if method == "adwin":
+        pytest.importorskip("river")
     controls = [(toy(seed=k)[0], T_DEPLOY, N) for k in range(3)]
-    value, rate = calibrate("profile_conformal", controls, target_days=14)
-    assert rate == false_alarm_rate("profile_conformal", controls, value)
-    assert rate <= 1 / (14 * DAY) or value == DETECTORS["profile_conformal"][2][-1]
-    assert false_alarm_rate("profile_conformal", controls, 1.0) >= rate  # a more sensitive setting alarms at least as often
+    value, rate = calibrate(method, controls, target_days=14)
+    assert rate == false_alarm_rate(method, controls, value)
+    assert rate <= 1 / (14 * DAY) or value == DETECTORS[method][2][-1]
+    assert false_alarm_rate(method, controls, sensitive) >= rate  # the most sensitive setting alarms at least as often
     # alarms outside the window do not count: the window before the shift of a changed series is clean
     y, _ = toy(shift=40)
-    before = false_alarm_rate("profile_conformal", [(y, T_DEPLOY, T_CHANGE)], 2.0)
-    whole = false_alarm_rate("profile_conformal", [(y, T_DEPLOY, N)], 2.0)
+    before = false_alarm_rate(method, [(y, T_DEPLOY, T_CHANGE)], setting)
+    whole = false_alarm_rate(method, [(y, T_DEPLOY, N)], setting)
     assert before <= whole
 
 
@@ -124,7 +121,7 @@ def test_alerts_file_round_trip_and_timestamp_matching(tmp_path):
     utc = series_dict(y, F, start="2017-01-02 00:00:00+00:00", source="entsoe", series="IT", scenario="lockdown_2020")
     naive = series_dict(y, F)
     manifest = series_table([utc, naive])
-    alerts = detect_all([utc, naive], {"entsoe": {"profile_conformal": 2.0}, "synthetic": {"profile_conformal": 2.0}})
+    alerts = detect_all([utc, naive], {"entsoe": {"residual_conformal": 1.6}, "synthetic": {"residual_conformal": 1.6}})
     assert set(alerts.columns) == {"id", "source", "series", "scenario", "method", "timestamp", "index", "score", "threshold"}
     assert alerts["timestamp"].iloc[0] == pd.Timestamp("2017-01-02 00:00:00+00:00") + pd.Timedelta(hours=int(alerts["index"].iloc[0]))
     path = tmp_path / "alerts.csv"
@@ -133,7 +130,7 @@ def test_alerts_file_round_trip_and_timestamp_matching(tmp_path):
     for s in (utc, naive):
         sid = f"{s['source']}/{s['series']}/{s['scenario']}"
         expect = alerts[alerts["id"] == sid]["index"].to_numpy()
-        assert np.array_equal(back[sid]["profile_conformal"], expect)
+        assert np.array_equal(back[sid]["residual_conformal"], expect)
     # rows with an index only, outside the series, or with an unknown id
     extra = pd.DataFrame([dict(id="entsoe/IT/lockdown_2020", method="m", timestamp=None, index=7),
                           dict(id="entsoe/IT/lockdown_2020", method="m", timestamp="2030-01-01 00:00:00+00:00", index=None),

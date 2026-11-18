@@ -16,8 +16,7 @@ from tests.test_alarms import series_dict
 from tests.test_backtester import T_CHANGE, T_DEPLOY, toy
 
 
-@pytest.mark.parametrize("method,value", [("profile_conformal", 1.2), ("profile_conformal", 1.0), ("adwin", 0.003),
-                                          ("residual_conformal", 1.6), ("residual_conformal", 1.0)])
+@pytest.mark.parametrize("method,value", [("adwin", 0.003), ("adwin", 0.03), ("residual_conformal", 1.6), ("residual_conformal", 1.0)])
 def test_online_detector_raises_the_alarms_of_the_batch_detector(method, value):
     y, _ = toy(shift=12, seed=3)
     batch = alarms_in(method, y, T_DEPLOY, value)
@@ -25,7 +24,7 @@ def test_online_detector_raises_the_alarms_of_the_batch_detector(method, value):
     online = [a for a in (det.update(v) for v in y) if a is not None]
     assert [a["index"] for a in online] == batch["index"].tolist()
     assert len(online) > 0
-    if method in ("profile_conformal", "residual_conformal"):  # same scores and thresholds, not only the same positions
+    if method == "residual_conformal":  # same scores and thresholds, not only the same positions
         assert np.array_equal([a["score"] for a in online], batch["score"].to_numpy())
         assert np.array_equal([a["threshold"] for a in online], batch["threshold"].to_numpy())
 
@@ -36,12 +35,12 @@ def test_monitor_played_to_the_end_equals_the_backtest(name):
     s = series_dict(y, F)
     st = STRATEGY_BY_NAME[name]
     advisors = {"rules": RuleAdvisor()}
-    detector = "profile_conformal" if st.trigger == "alarm" else None
-    m = Monitor(s, st, detector=detector, detector_value=1.2, advisors=advisors)
+    detector = "adwin" if st.trigger == "alarm" else None
+    m = Monitor(s, st, detector=detector, detector_value=0.003, advisors=advisors)
     events = []
     while not m.done:
         events += m.advance(29)  # chunks that do not line up with the days
-    alarms = alarms_in("profile_conformal", y, T_DEPLOY, 1.2)["index"].to_numpy() if detector else None
+    alarms = alarms_in("adwin", y, T_DEPLOY, 0.003)["index"].to_numpy() if detector else None
     ref = backtest(y, F, T_DEPLOY, st, s["base_features"], advisors=advisors, alarms=alarms, detector=detector)
     got = m.run.result(None if alarms is None else np.asarray(m.alarms))
     assert np.array_equal(got["pred"], ref["pred"], equal_nan=True)
@@ -76,12 +75,12 @@ def test_monitor_with_the_stream_a_detector_equals_the_backtest(name):
 def test_monitor_uses_only_values_read_so_far():
     y, F = toy(shift=20, seed=1)
     s = series_dict(y, F)
-    m = Monitor(s, "alarm_gate", detector="profile_conformal", detector_value=1.2)
+    m = Monitor(s, "alarm_gate", detector="adwin", detector_value=0.003)
     events = m.advance(T_CHANGE - T_DEPLOY + 5 * DAY)
     y2 = y.copy()
     y2[m.now:] += 1000.0  # the future changes completely
     s2 = series_dict(y2, F)
-    m2 = Monitor(s2, "alarm_gate", detector="profile_conformal", detector_value=1.2)
+    m2 = Monitor(s2, "alarm_gate", detector="adwin", detector_value=0.003)
     events2 = m2.advance(T_CHANGE - T_DEPLOY + 5 * DAY)
     def strip(evs):  # the time a review took differs between runs; the forecasts of the next day are checked below
         return [{k: v for k, v in e.items() if k != "seconds" and not (e["type"] == "forecast" and k == "forecast")} for e in evs]

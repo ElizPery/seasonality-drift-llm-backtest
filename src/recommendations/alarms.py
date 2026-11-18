@@ -8,21 +8,18 @@ turns it into alarm positions per series and detector. The detector of stream A 
   mode for a daily period. Its residual of an hour comes from an STL fit on a block that ends up to 23 hours
   later, so an alarm is dated at the end of its block, the first hour at which it is known.
 
-Two stand-in detectors run next to it. Both use only the past: the residual of each hour is the value minus the
-median of the same hour of the last `PROFILE_WEEKS` weeks, then
+ADWIN runs next to it as the reference detector:
 
-* profile_conformal: the deviation of the residual from the median of the last `CALIB` residuals is compared
-  with a threshold, the 95% quantile of such deviations over the same window times a multiplier; an alarm
-  needs two consecutive violations and is followed by a one-day cooldown (the rule of the stream A detector);
-* adwin: ADWIN (Bifet and Gavalda, 2007) on the same residuals, checked at every point.
+* adwin: ADWIN (Bifet and Gavalda, 2007), checked at every point, on the residual of each hour: the value minus
+  the median of the same hour of the week over the last `PROFILE_WEEKS` weeks, which uses only the past.
 
-The multipliers and the ADWIN delta are calibrated per source on a control period without changes (synthetic:
+The multiplier of the stream A detector and the ADWIN delta are calibrated per source on a control period without changes (synthetic:
 the control series, scenario "none"; seismic noise: the weeks between deployment and the first measures; ENTSO-E:
 the year 2019) to a target false alarm rate, one alarm per `TARGET_DAYS` days, so the methods are compared at the
-same false alarm rate. Settings calibrated on one source do not carry over to another (checked on 02.11.2026:
-the synthetic settings gave 6 times the target rate on the national load), hence the calibration per source.
+same false alarm rate. Settings calibrated on one source do not carry over to another, hence the calibration per
+source.
 
-    python -m src.recommendations.alarms        # calibrate, run all on all series, write data/alerts/alerts.csv
+    python -m src.recommendations.alarms        # calibrate, run both on all series, write data/alerts/alerts.csv
                                                 # (about 18 minutes on 8 cores: the STL fits of the stream A detector)
 """
 from __future__ import annotations
@@ -41,9 +38,7 @@ from src.recommendations.forecast import DAY, WEEK
 
 ALERTS_DIR = Path("data/alerts")
 PROFILE_WEEKS = 4
-CALIB = 2 * WEEK
 TARGET_DAYS = 14
-MULT_GRID = (1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 5.0)
 DELTA_GRID = (0.3, 0.1, 0.03, 0.01, 0.003, 0.001, 3e-4, 1e-4, 3e-5, 1e-5, 1e-6)
 RESIDUAL_GRID = (1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0)
 
@@ -54,33 +49,6 @@ def profile_residuals(y: np.ndarray, weeks: int = PROFILE_WEEKS) -> np.ndarray:
     for k in range(1, weeks + 1):
         past[k - 1, k * WEEK:] = y[: len(y) - k * WEEK]
     return y - np.median(past, axis=0)
-
-
-def conformal_scores(r: np.ndarray, mult: float, calib: int = CALIB, alpha: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
-    """Score and threshold of the conformal rule at every position of the residuals `r`: the deviation of the residual
-    from the median of the previous `calib` residuals, and `mult` times the (1 - alpha) quantile of the previous
-    deviations. Both use only earlier positions, so the values at position i depend on r[i - 2 calib .. i] only."""
-    s = pd.Series(r)
-    med = s.rolling(calib, min_periods=calib // 2).median().shift(1)
-    dev = (s - med).abs()
-    thr = dev.rolling(calib, min_periods=calib // 2).quantile(1 - alpha).shift(1) * mult
-    return dev.to_numpy(), thr.to_numpy()
-
-
-def conformal_alarms(r: np.ndarray, start: int, mult: float, calib: int = CALIB, alpha: float = 0.05,
-                     consecutive: int = 2, cooldown: int = DAY) -> pd.DataFrame:
-    """Alarms of the conformal rule on residuals `r` from position `start` on: deviation of the residual from
-    the median of the previous `calib` residuals against `mult` times the (1 - alpha) quantile of the previous
-    deviations. Returns the positions with their score and threshold."""
-    score, thr = conformal_scores(r, mult, calib, alpha)
-    viol = (score > thr) & np.isfinite(thr)
-    out, run, last = [], 0, -cooldown
-    for i in range(start, len(r)):
-        run = run + 1 if viol[i] else 0
-        if run >= consecutive and i - last >= cooldown:
-            out.append((i, float(score[i]), float(thr[i])))
-            last = i
-    return pd.DataFrame(out, columns=["index", "score", "threshold"])
 
 
 def adwin_alarms(r: np.ndarray, start: int, delta: float) -> pd.DataFrame:
@@ -248,13 +216,12 @@ def residual_conformal_alarms(y: np.ndarray, start: int, mult: float) -> pd.Data
     return pd.DataFrame(out, columns=["index", "score", "threshold"])
 
 
-DETECTORS = {"residual_conformal": (residual_conformal_alarms, "mult", RESIDUAL_GRID),
-             "profile_conformal": (conformal_alarms, "mult", MULT_GRID), "adwin": (adwin_alarms, "delta", DELTA_GRID)}
-ON_VALUES = ("residual_conformal",)  # detectors that take the series itself; the others take the profile residuals
+DETECTORS = {"residual_conformal": (residual_conformal_alarms, "mult", RESIDUAL_GRID), "adwin": (adwin_alarms, "delta", DELTA_GRID)}
+ON_VALUES = ("residual_conformal",)  # detectors that take the series itself; ADWIN takes the profile residuals
 
 
 def alarms_in(method: str, y: np.ndarray, start: int, value: float) -> pd.DataFrame:
-    """Alarms of one detector on `y` (the stand-ins: on its profile residuals) from position `start` on."""
+    """Alarms of one detector on `y` (ADWIN: on its profile residuals) from position `start` on."""
     return DETECTORS[method][0](y if method in ON_VALUES else profile_residuals(y), start, value)
 
 
@@ -264,56 +231,41 @@ def alarms_of(method: str, s: dict, value: float) -> pd.DataFrame:
 
 class OnlineDetector:
     """A detector fed one value at a time, for the monitoring service. It raises the same alarms as
-    `alarms_in(method, y, start, value)` on the whole series (checked in the tests): the profile residual of a new
-    value needs the same hour of the last `PROFILE_WEEKS` weeks, the conformal rule the last 2 `CALIB` residuals,
-    ADWIN keeps its own state, and the stream A detector runs as `ResidualStream`. Values before `start` only
-    build up that history."""
+    `alarms_in(method, y, start, value)` on the whole series (checked in the tests): the stream A detector runs as
+    `ResidualStream`, and ADWIN keeps its own state on the profile residual of each new value, which needs the same
+    hour of the last `PROFILE_WEEKS` weeks. Values before `start` only build up that history."""
 
-    def __init__(self, method: str, value: float, start: int, weeks: int = PROFILE_WEEKS, calib: int = CALIB,
-                 consecutive: int = 2, cooldown: int = DAY):
+    def __init__(self, method: str, value: float, start: int, weeks: int = PROFILE_WEEKS):
         if method not in DETECTORS:
             raise ValueError(f"unknown detector {method}; known: {', '.join(DETECTORS)}")
-        self.method, self.value, self.start, self.weeks, self.calib = method, value, start, weeks, calib
-        self.consecutive, self.cooldown = consecutive, cooldown
+        self.method, self.value, self.start, self.weeks = method, value, start, weeks
         self.y: list[float] = []
-        self.r: list[float] = []
-        self.run, self.last = 0, -cooldown  # state of the conformal rule (see `conformal_alarms`)
         self.adwin = None
         self.stream = ResidualStream(value, start) if method == "residual_conformal" else None
 
     def update(self, value: float) -> dict | None:
-        """Add the next value of the series; returns the alarm at its position (index, score, threshold) or None."""
+        """Add the next value of the series; returns the alarm (index, score, threshold; the stream A detector also
+        `detected`) or None."""
         if self.stream is not None:
             return self.stream.update(value)
         i = len(self.y)
         self.y.append(float(value))
         past = [self.y[i - k * WEEK] for k in range(1, self.weeks + 1)] if i >= self.weeks * WEEK else [np.nan]
         r = self.y[i] - float(np.median(past))
-        self.r.append(r)
-        if self.method == "adwin":
-            if self.adwin is None:
-                if not np.isfinite(r):
-                    return None
-                from river import drift
+        if self.adwin is None:
+            if not np.isfinite(r):
+                return None
+            from river import drift
 
-                self.adwin = drift.ADWIN(delta=self.value, clock=1)
-            self.adwin.update(r)
-            if self.adwin.drift_detected and i >= self.start:
-                return dict(index=i, score=float(self.adwin.estimation), threshold=np.nan)
-            return None
-        if i < self.start:
-            return None
-        tail = np.asarray(self.r[max(0, i - 2 * self.calib):], dtype=float)
-        score, thr = (float(v[-1]) for v in conformal_scores(tail, self.value, self.calib))
-        self.run = self.run + 1 if (score > thr and np.isfinite(thr)) else 0
-        if self.run >= self.consecutive and i - self.last >= self.cooldown:
-            self.last = i
-            return dict(index=i, score=score, threshold=thr)
+            self.adwin = drift.ADWIN(delta=self.value, clock=1)
+        self.adwin.update(r)
+        if self.adwin.drift_detected and i >= self.start:
+            return dict(index=i, score=float(self.adwin.estimation), threshold=np.nan)
         return None
 
 
 def detector_settings(path: str | Path = ALERTS_DIR / "detectors.csv") -> dict[str, dict[str, float]]:
-    """Calibrated setting of every stand-in detector per source, as written by `main` (source -> method -> value)."""
+    """Calibrated setting of every detector per source, as written by `main` (source -> method -> value)."""
     df = pd.read_csv(path)
     return {src: dict(zip(g["method"], g["value"].astype(float))) for src, g in df.groupby("source")}
 

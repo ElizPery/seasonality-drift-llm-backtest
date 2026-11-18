@@ -10,7 +10,7 @@ class SessionCreate(BaseModel):
     series_id: str = Field(description="id of an exported series, source/series/scenario (see GET /series)",
                            examples=["entsoe/PT/lockdown_2020"])
     strategy: str = Field("alarm_rules_gate", description="a strategy of the backtest (see GET /strategies)")
-    detector: str | None = Field("profile_conformal", description="detector: residual_conformal (stream A), profile_conformal or adwin; "
+    detector: str | None = Field("residual_conformal", description="detector: residual_conformal (stream A) or adwin; "
                                  "needed by the strategies that review the model on alarms")
     detector_value: float | None = Field(None, description="its setting (multiplier or ADWIN delta); "
                                          "default: the value calibrated for the source of the series")
@@ -80,7 +80,7 @@ class DetectRequest(BaseModel):
     series_id: str | None = Field(None, description="an exported series; or give `values` and `start`")
     values: list[float] | None = Field(None, description="hourly values without gaps")
     start: str | None = Field(None, description="time of the first value (for `values`)")
-    method: str = "profile_conformal"
+    method: str = "residual_conformal"
     value: float | None = Field(None, description="setting of the detector; default: calibrated for the source")
     from_index: int | None = Field(None, description="report alarms from this position on (default: deployment of the "
                                    "exported series, or 5 weeks into `values`)")

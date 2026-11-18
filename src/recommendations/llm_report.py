@@ -96,7 +96,9 @@ def configurations(runs: pd.DataFrame, recal: pd.DataFrame | None = None, metric
     Strategies on alarm carry the detector (`alarm_retrain [adwin]`), advisors the model and the prompt variant
     (`llm_gate|mistralai/mistral-small-3.2-24b-instruct|examples`); the ablation without diagnostics is left out."""
     df = runs[runs.source.isin(REAL)].copy()
-    name = df.strategy.where(df.model.isna(), df.strategy + "|" + df.model.fillna("").str.replace("openrouter/", ""))
+    # only language models carry their name (`provider/model`); the rules advisor is a strategy like the others
+    llm = df.model.fillna("").str.contains("/")
+    name = df.strategy.where(~llm, df.strategy + "|" + df.model.fillna("").str.replace("openrouter/", ""))
     df["name"] = name.where(df.detector.isna(), name + " [" + df.detector.fillna("").astype(str) + "]")
     df = df[~df.name.str.contains(r"\|bare")]
     table = df.pivot_table(index=KEY, columns="name", values=metric, aggfunc="mean")

@@ -73,12 +73,12 @@ def test_wilcoxon_pairs_counts_and_direction():
 def test_wide_table_from_runs_with_detectors():
     runs = pd.DataFrame(dict(source="s", series=["x", "x", "x", "y", "y", "y"], scenario="c",
                              strategy=["nothing", "alarm_retrain", "alarm_retrain"] * 2,
-                             detector=[np.nan, "adwin", "profile_conformal"] * 2, mase_post=[1.0, 0.9, 0.8, 1.2, 1.1, 1.3]))
-    assert tagged(runs).tolist()[:3] == ["nothing", "alarm_retrain [adwin]", "alarm_retrain [profile_conformal]"]
-    t = wide(runs, ["nothing", "alarm_retrain [adwin]", "alarm_retrain [profile_conformal]"])
-    assert t.shape == (2, 3) and t.loc[("s", "y", "c"), "alarm_retrain [profile_conformal]"] == 1.3
+                             detector=[np.nan, "adwin", "residual_conformal"] * 2, mase_post=[1.0, 0.9, 0.8, 1.2, 1.1, 1.3]))
+    assert tagged(runs).tolist()[:3] == ["nothing", "alarm_retrain [adwin]", "alarm_retrain [residual_conformal]"]
+    t = wide(runs, ["nothing", "alarm_retrain [adwin]", "alarm_retrain [residual_conformal]"])
+    assert t.shape == (2, 3) and t.loc[("s", "y", "c"), "alarm_retrain [residual_conformal]"] == 1.3
     with pytest.raises(ValueError):
-        wide(runs.iloc[:5], ["nothing", "alarm_retrain [adwin]", "alarm_retrain [profile_conformal]"])
+        wide(runs.iloc[:5], ["nothing", "alarm_retrain [adwin]", "alarm_retrain [residual_conformal]"])
 
 
 def test_cd_diagram_draws():

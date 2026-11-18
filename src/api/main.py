@@ -6,7 +6,7 @@ of the backtest (detector alarm, advisor, acceptance check, action) taken live.
 
 A session plays one exported series (`python -m src.data.export`) hour by hour from the deployment of the model. The
 numbers are those of the experiments: the decisions are taken by the code of the backtest (`StrategyRun`), and the
-stand-in detectors give the alarms of `data/alerts/alerts.csv`.
+detectors, fed one value at a time, give the alarms of `data/alerts/alerts.csv`.
 
 Environment: SERIES_DIR (exported series, default data/processed/series), DETECTORS_FILE (calibrated detector settings,
 default data/alerts/detectors.csv), DATABASE_URL (PostgreSQL for the Grafana history; optional), GRAFANA_URL (address
@@ -152,7 +152,7 @@ def session_reviews(request: Request, sid: int, outcome: str | None = None) -> l
 
 @app.post("/detect")
 def detect(request: Request, req: schemas.DetectRequest) -> schemas.DetectAnswer:
-    """Alarms of a stand-in detector on an exported series or on posted hourly values (only the past is used)."""
+    """Alarms of a detector on an exported series or on posted hourly values (only the past is used)."""
     m = manager(request)
     if req.method not in DETECTORS:
         raise HTTPException(422, f"unknown method {req.method}; known: {', '.join(DETECTORS)}")
