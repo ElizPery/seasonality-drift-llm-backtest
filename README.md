@@ -319,8 +319,8 @@ after the change 0.7548643518593062, the value in `runs.csv`. `tests/test_monito
 this on a small series.
 
 - `src/recommendations/monitor.py`: `Monitor`, the engine of a session (no web code).
-- `src/api/main.py`: FastAPI application; `sessions.py` (sessions playing in the background), `store.py` (history
-  in PostgreSQL for Grafana), `schemas.py` (requests and answers).
+- `src/api/main.py`: FastAPI application; `sessions.py` (sessions playing in the background), `uploads.py` (series
+  added through the API), `store.py` (history in PostgreSQL for Grafana), `schemas.py` (requests and answers).
 - `src/monitoring/metrics.py`: Prometheus metrics, served at `/metrics/`.
 - `docker-compose.yml`, `Dockerfile`, `requirements-service.txt`: the API, PostgreSQL, Prometheus and Grafana;
   `deploy/` holds the Prometheus configuration and the provisioned Grafana data sources and dashboards.
@@ -332,11 +332,34 @@ docker compose up --build -d              # API http://localhost:8000/docs, Graf
 curl -X POST localhost:8000/sessions -H 'content-type: application/json' \
      -d '{"series_id": "seismic/IV.MILN/lockdown_2020", "strategy": "alarm_rules_gate", "detector": "residual_conformal", "speed": 12}'
                                           # the answer has `grafana_url`: the dashboard of this session around the change
-docker compose down                       # stop (add -v to delete the history)
+curl -X POST 'localhost:8000/series/csv?name=shop_42&deploy_at=2024-03-04' -H 'content-type: text/csv' \
+     --data-binary @my_series.csv         # your own data: see "Your own series" below
+docker compose down                       # stop (add -v to delete the history and the uploaded series)
 uvicorn src.api.main:app --port 8000      # or without Docker: no history for Grafana, the API and the metrics stay
 ```
 
-Endpoints: `GET /series`, `GET /strategies` (strategies, detectors, calibrated settings, catalog), `POST /sessions`
+#### Your own series
+
+The loop also runs on data that are not part of the experiments. A series is uploaded as a standard frame, a CSV with
+the columns `timestamp` and `value` and one row per hour without gaps (`POST /series/csv`, the file is the body of the
+request), or as JSON with `start` and `values` (`POST /series`). `deploy_at` is the moment the forecasting model goes
+to work: the values before it are its history (at least 8 weeks), the values from it on are played by a session (at
+least 3 weeks); `change_at` is optional and only adds the error after a known change to the answers. The series gets
+the id `user/<name>/uploaded` and is then used like an exported one in `POST /sessions` and `POST /detect`; it is kept
+in `data/processed/uploads` (a Docker volume) and can be deleted with `DELETE /series/{id}`.
+
+The detector settings of the experiments are calibrated per source, so an uploaded series gets its own: each detector
+is calibrated on the history of the series, on the hours from week 5 to the deployment, to the same target of one false
+alarm per 14 days, and the answer of the upload shows the settings and the rate reached. Only values before the
+deployment are used. One series gives a short control period (3 weeks at the minimum history), so these settings are
+rougher than those of the experiments and tend to be more sensitive; `detector_value` of a session overrides them.
+For example, the Milan series uploaded as a CSV gets the multiplier 5 for `residual_conformal` from its own 8 control
+weeks (8 in the experiments, from 15 stations) and ends with 3 alarms, 2 model changes and MASE after the change
+1.120; with `detector_value` 8 it gives the session of the exported series, 1 alarm and 1.142. The features use the
+hour and the weekday of the timestamps as they are given, so the stamps should follow the clock of the daily cycle.
+
+Endpoints: `GET /series`, `POST /series`, `POST /series/csv`, `DELETE /series/{id}` (uploaded series),
+`GET /strategies` (strategies, detectors, calibrated settings, catalog), `POST /sessions`
 (series, strategy, detector, `speed` in hours of data per second, `skip_to_days_before_change`, `paused`),
 `GET /sessions`, `GET|PATCH|DELETE /sessions/{id}` (state, errors, counters; speed and pause),
 `POST /sessions/{id}/advance` (read hours at once), `GET /sessions/{id}/reviews` (every review: trigger, proposal and

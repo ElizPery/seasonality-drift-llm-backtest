@@ -1,6 +1,7 @@
-"""Sessions of the monitoring service: one exported series played hour by hour under one strategy (`Monitor`), with
-its Prometheus metrics and, if a database is configured, its history for Grafana. A session plays in the background
-at `speed` hours of data per second; it can be paused, advanced by hand, sped up or deleted."""
+"""Sessions of the monitoring service: one exported or uploaded series played hour by hour under one strategy
+(`Monitor`), with its Prometheus metrics and, if a database is configured, its history for Grafana. A session plays in
+the background at `speed` hours of data per second; it can be paused, advanced by hand, sped up or deleted. The manager
+also keeps the series uploaded through the API (`src.api.uploads`) in their own folder."""
 from __future__ import annotations
 
 import asyncio
@@ -13,6 +14,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.api import uploads
+from src.data.frames import series_file, series_frame, series_table
 from src.monitoring import metrics as M
 from src.recommendations.alarms import ALERTS_DIR, detector_settings
 from src.recommendations.data_sources import EXPORT_DIR, read_manifest, read_series
@@ -22,6 +25,9 @@ from src.recommendations.monitor import STRATEGY_BY_NAME, Monitor
 log = logging.getLogger("drift.sessions")
 TICK = 0.25  # seconds between two reads of a playing session
 DASHBOARD = "d/drift-monitor/drift-monitor"
+UPLOAD_DIR = Path("data/processed/uploads")  # series uploaded through the API, with their own manifest.csv
+MANIFEST_COLUMNS = ["id", "file", "source", "series", "scenario", "client", "seed", "magnitude", "n", "start", "t_deploy",
+                    "t_change", "t_stop", "deploy_at", "change_at"]
 
 
 def advisors_for(strategy, llm_model: str | None) -> dict | None:
@@ -177,14 +183,21 @@ class Session:
 
 class Manager:
     def __init__(self, series_dir: str | Path | None = None, detectors_file: str | Path | None = None,
-                 database_url: str | None = None, grafana_url: str | None = None):
+                 database_url: str | None = None, grafana_url: str | None = None, upload_dir: str | Path | None = None):
         self.series_dir = Path(series_dir or os.environ.get("SERIES_DIR", EXPORT_DIR))
         if (self.series_dir / "manifest.csv").exists():
-            self.manifest = read_manifest(self.series_dir)
-        else:  # the service starts, but has no series until `python -m src.data.export` has written them
+            self.exported = read_manifest(self.series_dir)
+        else:  # the service starts, but has no series until one is exported (`python -m src.data.export`) or uploaded
             log.warning("no exported series in %s: run python -m src.data.export", self.series_dir)
-            self.manifest = pd.DataFrame(columns=["id", "file", "source", "series", "scenario", "client", "seed", "magnitude",
-                                                  "n", "start", "t_deploy", "t_change", "t_stop", "deploy_at", "change_at"])
+            self.exported = pd.DataFrame(columns=MANIFEST_COLUMNS)
+        self.upload_dir = Path(upload_dir or os.environ.get("UPLOAD_DIR", UPLOAD_DIR))
+        self.uploaded = (read_manifest(self.upload_dir) if (self.upload_dir / "manifest.csv").exists()
+                         else pd.DataFrame(columns=MANIFEST_COLUMNS))
+        self.uploaded_settings = pd.DataFrame(columns=["id", "method", "param", "value", "far_control_per_1000",
+                                                       "target_per_1000", "control_hours"])
+        if (self.upload_dir / "detectors.csv").exists():
+            self.uploaded_settings = pd.read_csv(self.upload_dir / "detectors.csv")
+        self.upload_lock = threading.Lock()
         path = Path(detectors_file or os.environ.get("DETECTORS_FILE", ALERTS_DIR / "detectors.csv"))
         self.settings = detector_settings(path) if path.exists() else {}
         self.grafana_url = grafana_url if grafana_url is not None else os.environ.get("GRAFANA_URL", "http://localhost:3000")
@@ -201,13 +214,86 @@ class Manager:
         for state in ("playing", "paused", "done", "failed"):
             M.SESSIONS.labels(state).set(sum(1 for s in self.sessions.values() if s.state == state))
 
-    def setting(self, source: str, method: str, value: float | None) -> float:
+    @property
+    def manifest(self) -> pd.DataFrame:
+        """The exported series and the uploaded ones."""
+        if self.uploaded.empty:
+            return self.exported
+        return self.uploaded if self.exported.empty else pd.concat([self.exported, self.uploaded], ignore_index=True)
+
+    def is_uploaded(self, series_id: str) -> bool:
+        return bool((self.uploaded["id"] == series_id).any())
+
+    def read(self, series_id: str) -> dict:
+        """One series by its id, from the folder of the exported or of the uploaded series (KeyError if unknown)."""
+        if self.is_uploaded(series_id):
+            return read_series(series_id, self.upload_dir, self.uploaded)
+        return read_series(series_id, self.series_dir, self.exported)
+
+    def setting(self, source: str, method: str, value: float | None, series_id: str | None = None) -> float:
+        """Setting of a detector: the given value, else the one calibrated for the uploaded series, else for the source."""
         if value is not None:
             return float(value)
+        own = self.uploaded_settings
+        own = own[(own["id"] == series_id) & (own["method"] == method)]
+        if not own.empty:
+            return float(own["value"].iloc[0])
         try:
             return self.settings[source][method]
         except KeyError:
             raise ValueError(f"no calibrated setting of {method} for {source}: give it explicitly") from None
+
+    def series_info(self, series_id: str) -> dict:
+        row = self.manifest[self.manifest["id"] == series_id].iloc[0]
+        own = self.uploaded_settings[self.uploaded_settings["id"] == series_id]
+        change = row["change_at"]
+        stamp = lambda x: str(pd.Timestamp(x))  # noqa: E731  (a manifest column of midnights is written as dates)
+        return dict(id=series_id, source=row["source"], n=int(row["n"]), start=stamp(row["start"]),
+                    deploy_at=stamp(row["deploy_at"]), change_at=None if pd.isna(change) else stamp(change),
+                    history_hours=int(row["t_deploy"]),
+                    detectors=[dict(method=r["method"], param=r["param"], value=float(r["value"]),
+                                    false_alarms_per_1000_hours=float(r["far_control_per_1000"]),
+                                    target_per_1000_hours=float(r["target_per_1000"]), control_hours=int(r["control_hours"]))
+                               for _, r in own.iterrows()])
+
+    def add_series(self, s: dict, replace: bool = False) -> dict:
+        """Store an uploaded series (`uploads.build`) with the detector settings calibrated on its own history. Raises
+        FileExistsError if the id is taken and `replace` is not set; an exported series is never replaced."""
+        sid = uploads.series_id(s["series"])
+        if (self.exported["id"] == sid).any() or (self.is_uploaded(sid) and not replace):
+            raise FileExistsError(sid)
+        calibrated = uploads.calibrate_on_history(s)  # outside the lock: it takes seconds on a long series
+        row = series_table([s])
+        row.insert(1, "file", [series_file(s)])
+        with self.upload_lock:
+            self.upload_dir.mkdir(parents=True, exist_ok=True)
+            series_frame(s).to_csv(self.upload_dir / row["file"].iloc[0], index=False)
+            self._forget(sid)
+            own = pd.DataFrame([dict(id=sid, **c) for c in calibrated])
+            self.uploaded = row if self.uploaded.empty else pd.concat([self.uploaded, row], ignore_index=True)
+            self.uploaded_settings = own if self.uploaded_settings.empty else pd.concat([self.uploaded_settings, own],
+                                                                                        ignore_index=True)
+            self._save_uploads()
+            self.uploaded = read_manifest(self.upload_dir)  # with the types of a manifest read from disk
+        return self.series_info(sid)
+
+    def remove_series(self, series_id: str) -> None:
+        """Delete an uploaded series (KeyError if it is not one). Sessions that play it keep their copy of the data."""
+        with self.upload_lock:
+            rows = self.uploaded[self.uploaded["id"] == series_id]
+            if rows.empty:
+                raise KeyError(series_id)
+            (self.upload_dir / rows["file"].iloc[0]).unlink(missing_ok=True)
+            self._forget(series_id)
+            self._save_uploads()
+
+    def _forget(self, series_id: str) -> None:
+        self.uploaded = self.uploaded[self.uploaded["id"] != series_id].reset_index(drop=True)
+        self.uploaded_settings = self.uploaded_settings[self.uploaded_settings["id"] != series_id].reset_index(drop=True)
+
+    def _save_uploads(self) -> None:
+        self.uploaded.to_csv(self.upload_dir / "manifest.csv", index=False)
+        self.uploaded_settings.to_csv(self.upload_dir / "detectors.csv", index=False)
 
     def create(self, req) -> Session:
         """Build the session (loads the series and trains the deployed model, a few seconds); not yet playing."""
@@ -218,9 +304,9 @@ class Manager:
         if rows.empty:
             raise KeyError(req.series_id)
         row = rows.iloc[0]
-        s = read_series(req.series_id, self.series_dir, self.manifest)
+        s = self.read(req.series_id)
         detector = req.detector if (st.trigger == "alarm" or req.detector) else None
-        value = self.setting(s["source"], detector, req.detector_value) if detector else None
+        value = self.setting(s["source"], detector, req.detector_value, req.series_id) if detector else None
         monitor = Monitor(s, st, detector=detector, detector_value=value, advisors=advisors_for(st, req.llm_model))
         if self.store is not None:
             start = pd.Timestamp(row["start"])

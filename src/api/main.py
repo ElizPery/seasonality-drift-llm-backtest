@@ -6,10 +6,12 @@ of the backtest (detector alarm, advisor, acceptance check, action) taken live.
 
 A session plays one exported series (`python -m src.data.export`) hour by hour from the deployment of the model. The
 numbers are those of the experiments: the decisions are taken by the code of the backtest (`StrategyRun`), and the
-detectors, fed one value at a time, give the alarms of `data/alerts/alerts.csv`.
+detectors, fed one value at a time, give the alarms of `data/alerts/alerts.csv`. Other data come in through
+`POST /series` (JSON) or `POST /series/csv` (a standard frame): hourly values with the moment of deployment; the
+detectors are calibrated on the history of the uploaded series, and a session plays it like an exported one.
 
-Environment: SERIES_DIR (exported series, default data/processed/series), DETECTORS_FILE (calibrated detector settings,
-default data/alerts/detectors.csv), DATABASE_URL (PostgreSQL for the Grafana history; optional), GRAFANA_URL (address
+Environment: SERIES_DIR (exported series, default data/processed/series), UPLOAD_DIR (uploaded series, default
+data/processed/uploads), DETECTORS_FILE (calibrated detector settings, default data/alerts/detectors.csv), DATABASE_URL (PostgreSQL for the Grafana history; optional), GRAFANA_URL (address
 of Grafana for the links in the answers, default http://localhost:3000; empty: no links).
 """
 from __future__ import annotations
@@ -23,13 +25,12 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
 from prometheus_client import make_asgi_app
 
-from src.api import schemas
+from src.api import schemas, uploads
 from src.api.sessions import Manager, advisors_for
 from src.monitoring import metrics as M
 from src.recommendations.alarms import DETECTORS, alarms_in
 from src.recommendations.backtester import KINDS, VAL_WEEKS, check_action
 from src.recommendations.catalog import ACTIONS, CATALOG
-from src.recommendations.data_sources import read_series
 from src.recommendations.forecast import DAY, WEEK
 from src.recommendations.llm_client import diagnostics
 from src.recommendations.monitor import STRATEGY_BY_NAME
@@ -86,6 +87,49 @@ def list_series(request: Request, source: str | None = None, scenario: str | Non
         df = df[df["scenario"] == scenario]
     cols = ["id", "source", "series", "scenario", "n", "start", "deploy_at", "change_at"]
     return df[cols].head(limit).astype(object).where(df[cols].head(limit).notna(), None).to_dict("records")
+
+
+async def _store_series(request: Request, name: str, start, values, deploy_at: str, change_at: str | None, replace: bool):
+    m = manager(request)
+    try:
+        s = uploads.build(name, start, values, deploy_at, change_at)
+        return await asyncio.to_thread(m.add_series, s, replace)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
+    except FileExistsError as e:
+        raise HTTPException(409, f"series {e} exists: choose another name or set `replace`") from None
+
+
+@app.post("/series", status_code=201)
+async def upload_series(request: Request, req: schemas.SeriesUpload) -> schemas.SeriesInfo:
+    """Add an hourly series to the service: the values before `deploy_at` are the history on which the model is
+    trained and the detectors are calibrated, the values from it on are played by a session (`POST /sessions` with
+    the returned id). The answer shows the detector settings calibrated for the series."""
+    return await _store_series(request, req.name, req.start, req.values, req.deploy_at, req.change_at, req.replace)
+
+
+@app.post("/series/csv", status_code=201)
+async def upload_series_csv(request: Request, name: str, deploy_at: str, change_at: str | None = None,
+                            replace: bool = False) -> schemas.SeriesInfo:
+    """The same from a CSV file sent as the body of the request: the columns `timestamp` and `value`, one row per
+    hour without gaps (the standard frame of the repository)."""
+    try:
+        start, values = uploads.read_csv(await request.body())
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
+    return await _store_series(request, name, start, values, deploy_at, change_at, replace)
+
+
+@app.delete("/series/{series_id:path}", status_code=204)
+def delete_series(request: Request, series_id: str):
+    """Delete an uploaded series (the exported series of the experiments cannot be deleted)."""
+    m = manager(request)
+    try:
+        m.remove_series(series_id)
+    except KeyError:
+        known = (m.exported["id"] == series_id).any()
+        raise HTTPException(403 if known else 404, "only uploaded series can be deleted" if known
+                            else f"no series {series_id}") from None
 
 
 @app.get("/strategies")
@@ -152,13 +196,13 @@ def session_reviews(request: Request, sid: int, outcome: str | None = None) -> l
 
 @app.post("/detect")
 def detect(request: Request, req: schemas.DetectRequest) -> schemas.DetectAnswer:
-    """Alarms of a detector on an exported series or on posted hourly values (only the past is used)."""
+    """Alarms of a detector on an exported or uploaded series, or on posted hourly values (only the past is used)."""
     m = manager(request)
     if req.method not in DETECTORS:
         raise HTTPException(422, f"unknown method {req.method}; known: {', '.join(DETECTORS)}")
     if req.series_id is not None:
         try:
-            s = read_series(req.series_id, m.series_dir, m.manifest)
+            s = m.read(req.series_id)
         except KeyError:
             raise HTTPException(404, f"no series {req.series_id}") from None
         y, start, source = s["y"], pd.Timestamp(s["start"]), s["source"]
@@ -173,7 +217,7 @@ def detect(request: Request, req: schemas.DetectRequest) -> schemas.DetectAnswer
     if source is None and req.value is None:
         raise HTTPException(422, "give the setting `value` of the detector for posted values")
     try:
-        value = m.setting(source, req.method, req.value) if source else float(req.value)
+        value = m.setting(source, req.method, req.value, req.series_id) if source else float(req.value)
     except ValueError as e:
         raise HTTPException(422, str(e)) from None
     a = alarms_in(req.method, y, first, value)
