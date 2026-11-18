@@ -2,6 +2,8 @@
 numpy
 pandas
 scipy
+seaborn
+scikit_posthocs
 statsmodels>=0.14
 scikit-learn
 river
