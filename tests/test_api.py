@@ -83,6 +83,11 @@ def test_detect_on_a_series_and_on_posted_values(client):
     assert posted.status_code == 200
     assert [a["index"] for a in posted.json()["alarms"]] == alarms_in("adwin", y, T_DEPLOY, 0.003)["index"].tolist()
     assert c.post("/detect", json=dict(values=y.tolist(), start="2020-01-06")).status_code == 422  # no setting given
+    stream_a = c.post("/detect", json=dict(values=y.tolist(), start="2020-01-06", method="residual_conformal", value=1.6,
+                                           from_index=T_DEPLOY))
+    assert stream_a.status_code == 200
+    expected = alarms_in("residual_conformal", y, T_DEPLOY, 1.6)
+    assert len(expected) > 0 and [a["index"] for a in stream_a.json()["alarms"]] == expected["index"].tolist()
 
 
 def test_bad_requests(client):

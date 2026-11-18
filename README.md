@@ -38,7 +38,7 @@
     │   │   ├── plots.py            # Figures for the stream B notebook
     │   │   ├── run_backtest.py     # Stream B runner
     │   │   ├── llm_client.py       # Instructor + Pydantic v2 schemas for LLM
-    │   │   ├── alarms.py           # stand-in detectors (batch and online), alerts file
+    │   │   ├── alarms.py           # detector alarms: stream A detector and two stand-ins (batch and online), alerts file
     │   │   └── monitor.py          # Monitor: the decision loop as the data arrive (engine of the service)
     │   │
     │   ├── api/                    # MLOps microservice
@@ -245,14 +245,20 @@ alarms for 7 days (`cooldown_days`). They run once per detector in an alerts fil
 alarms are matched to the series by `id` and `timestamp`. Every row of `runs.csv` also reports `alarms` (alarms after
 deployment), `acts_pre` (model changes before the change of the series, all of them on a series without one: the cost
 of false alarms or of a fixed calendar) and `reaction_h` (hours from the change to the first model change after it).
-Until the detectors of stream A deliver their alarms, two stand-in detectors run on the same series, both using only
-the past: `profile_conformal` (the residual of each hour from the median of the same hour of the last 4 weeks, a
-conformal threshold on the last 2 weeks of residuals, two consecutive violations, one-day cooldown) and `adwin`
-(ADWIN on the same residuals). Their sensitivity is calibrated per source on a control period without changes (the
-60 synthetic control series; the seismic weeks between deployment and the first measures; the year 2019 of the
-national load) to one false alarm per 14 days: settings calibrated on one source do not carry over to another.
-`data/alerts/detectors.csv` records the chosen settings and the false alarm rate reached (ADWIN does not reach the
-target on the national load even at its strictest setting) and `data/alerts/alerts.csv` their alarms (kept in git).
+The detector of stream A runs on these series as `residual_conformal`: `ResidualConformalDriftDetector` of
+`src/detector` with the settings of its multi-series mode for a daily period. Its residual of an hour comes from an STL
+fit on a block that ends up to 23 hours later, so an alarm is dated at the end of its block, the first hour at which it
+is known (the tests check that the alarms are those of its `fit_predict` and do not depend on later values). Two
+stand-in detectors run next to it for comparison, both using only the past: `profile_conformal` (the residual of each
+hour from the median of the same hour of the last 4 weeks, a conformal threshold on the last 2 weeks of residuals, two
+consecutive violations, one-day cooldown) and `adwin` (ADWIN on the same residuals). The sensitivity of every detector
+is calibrated per source on a control period without changes (the 60 synthetic control series; the seismic weeks
+between deployment and the first measures; the year 2019 of the national load) to one false alarm per 14 days (2.98 per
+1000 hours): settings calibrated on one source do not carry over to another. `data/alerts/detectors.csv` records the
+chosen settings and the false alarm rate reached: `residual_conformal` gets the multiplier 8 on the national load (1.99
+per 1000 hours) and on the seismic noise (3.04, the strictest value of its grid, just above the target) and 4 on the
+synthetic series (2.90); ADWIN does not reach the target on the national load even at its strictest setting (8.30).
+`data/alerts/alerts.csv` holds the alarms of the three detectors (kept in git).
 
 Data: 240 synthetic series (20 UCI clients x 3 seeds x {no change, level shift 2 sigma, one-week ramp 2 sigma,
 noise x2}, 24 weeks, deployment at week 10, change at week 13), the national load of 8 countries (dataset 5,
@@ -268,7 +274,7 @@ python -m src.recommendations.run_backtest --sources seismic # recompute one sou
 python -m src.recommendations.run_backtest --advisors rules  # add the advised strategies (rules, llm) to runs.csv
 python -m src.recommendations.run_backtest --advisors llm --llm-model ollama/qwen2.5:7b-instruct --prompt examples --repeats 3
                                                              # LLM strategies with one model and one prompt variant
-python -m src.recommendations.alarms                         # stand-in detectors: calibrate, write data/alerts/alerts.csv
+python -m src.recommendations.alarms                         # calibrate the detectors, write data/alerts/alerts.csv
 python -m src.recommendations.run_backtest --alerts data/alerts/alerts.csv --advisors rules
                                                              # add the strategies that review on alarms, per detector
 python -m src.recommendations.llm_report                     # LLM advisors on the real series: paired tests against the
@@ -306,7 +312,7 @@ replays it on the last two weeks, and the action is applied only if the lower bo
 above 0. A second run of `nothing` on the same series shows the error the model would have without any change.
 
 The decisions are taken by the code of the backtest (`StrategyRun` in `backtester.py`, the loop that `backtest` also
-drives), and the stand-in detectors run one value at a time (`OnlineDetector` in `alarms.py`) with the alarms of the
+drives), and the detectors run one value at a time (`OnlineDetector` in `alarms.py`) with the alarms of the
 batch functions. A series played to its end therefore gives the numbers of `runs.csv`: for example, the national load
 of Portugal under `alarm_rules_gate` with `profile_conformal` ends with 9 alarms, 6 reviews, no model change and MASE
 after the change 0.7548643518593062, the value in `runs.csv`. `tests/test_monitor.py` and `tests/test_api.py` check
@@ -335,7 +341,7 @@ Endpoints: `GET /series`, `GET /strategies` (strategies, detectors, calibrated s
 `GET /sessions`, `GET|PATCH|DELETE /sessions/{id}` (state, errors, counters; speed and pause),
 `POST /sessions/{id}/advance` (read hours at once), `GET /sessions/{id}/reviews` (every review: trigger, proposal and
 reason of the advisor, checks with gain and interval, action, time taken), `POST /recommendations` (what the advisor
-proposes now and whether the check confirms it, without applying it), `POST /detect` (alarms of a stand-in detector on
+proposes now and whether the check confirms it, without applying it), `POST /detect` (alarms of a detector on
 an exported series or on posted values), `GET /health`, `GET /metrics/`.
 
 Grafana (anonymous view, admin/admin to edit): **Drift monitor** shows a session on the clock of the series: the values
@@ -354,5 +360,6 @@ Prometheus metrics (labels `session`, `series`, `strategy`, `detector`): `drift_
 `drift_api_requests_total`, `drift_api_request_seconds`.
 
 Not yet in the service: the LLM advisor inside the Docker image (the image has no Instructor client; outside Docker the
-`llm` strategies work with `llm_model`), the model registry in MLflow, and the detectors of stream A (the service plays
-the stand-in detectors until their alarms come as a function or a file).
+`llm` strategies work with `llm_model`) and the model registry in MLflow. The detector of stream A runs in the service
+as `residual_conformal` (`ResidualStream` in `alarms.py` feeds it one value at a time; an alarm arrives at the end of
+its STL block, up to 23 hours after the hour that raised it).

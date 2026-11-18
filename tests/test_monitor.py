@@ -16,7 +16,8 @@ from tests.test_alarms import series_dict
 from tests.test_backtester import T_CHANGE, T_DEPLOY, toy
 
 
-@pytest.mark.parametrize("method,value", [("profile_conformal", 1.2), ("profile_conformal", 1.0), ("adwin", 0.003)])
+@pytest.mark.parametrize("method,value", [("profile_conformal", 1.2), ("profile_conformal", 1.0), ("adwin", 0.003),
+                                          ("residual_conformal", 1.6), ("residual_conformal", 1.0)])
 def test_online_detector_raises_the_alarms_of_the_batch_detector(method, value):
     y, _ = toy(shift=12, seed=3)
     batch = alarms_in(method, y, T_DEPLOY, value)
@@ -24,7 +25,7 @@ def test_online_detector_raises_the_alarms_of_the_batch_detector(method, value):
     online = [a for a in (det.update(v) for v in y) if a is not None]
     assert [a["index"] for a in online] == batch["index"].tolist()
     assert len(online) > 0
-    if method == "profile_conformal":  # same scores and thresholds, not only the same positions
+    if method in ("profile_conformal", "residual_conformal"):  # same scores and thresholds, not only the same positions
         assert np.array_equal([a["score"] for a in online], batch["score"].to_numpy())
         assert np.array_equal([a["threshold"] for a in online], batch["threshold"].to_numpy())
 
@@ -51,6 +52,25 @@ def test_monitor_played_to_the_end_equals_the_backtest(name):
     assert len(decisions) >= ref["decisions"] > 0
     nothing = backtest(y, F, T_DEPLOY, STRATEGY_BY_NAME["nothing"], s["base_features"])
     assert np.array_equal(m.reference.pred, nothing["pred"], equal_nan=True)
+
+
+@pytest.mark.parametrize("name", ["alarm_retrain", "alarm_gate", "alarm_rules_gate"])
+def test_monitor_with_the_stream_a_detector_equals_the_backtest(name):
+    y, F = toy(shift=20, seed=1)
+    s = series_dict(y, F)
+    st = STRATEGY_BY_NAME[name]
+    advisors = {"rules": RuleAdvisor()}
+    m = Monitor(s, st, detector="residual_conformal", detector_value=1.6, advisors=advisors)
+    while not m.done:
+        m.advance(29)
+    alarms = alarms_in("residual_conformal", y, T_DEPLOY, 1.6)["index"].to_numpy()
+    assert len(alarms) > 0 and m.alarms == alarms[alarms < m.end].tolist()
+    ref = backtest(y, F, T_DEPLOY, st, s["base_features"], advisors=advisors, alarms=alarms, detector="residual_conformal")
+    got = m.run.result(np.asarray(m.alarms))
+    assert np.array_equal(got["pred"], ref["pred"], equal_nan=True)
+    for k in ("retrains", "picks", "decisions", "proposed", "accepted", "check_fits", "applied", "end"):
+        assert got[k] == ref[k], k
+    assert name != "alarm_retrain" or ref["retrains"] > 0  # the alarms did lead to model changes
 
 
 def test_monitor_uses_only_values_read_so_far():

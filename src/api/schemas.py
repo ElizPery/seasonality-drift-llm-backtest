@@ -10,7 +10,7 @@ class SessionCreate(BaseModel):
     series_id: str = Field(description="id of an exported series, source/series/scenario (see GET /series)",
                            examples=["entsoe/PT/lockdown_2020"])
     strategy: str = Field("alarm_rules_gate", description="a strategy of the backtest (see GET /strategies)")
-    detector: str | None = Field("profile_conformal", description="stand-in detector: profile_conformal or adwin; "
+    detector: str | None = Field("profile_conformal", description="detector: residual_conformal (stream A), profile_conformal or adwin; "
                                  "needed by the strategies that review the model on alarms")
     detector_value: float | None = Field(None, description="its setting (multiplier or ADWIN delta); "
                                          "default: the value calibrated for the source of the series")

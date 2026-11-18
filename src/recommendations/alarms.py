@@ -2,27 +2,35 @@
 
 Alarms come from a CSV (`data/alerts/alerts.csv`): one row per alarm with `id` (source/series/scenario as in
 the manifest of `src.data`), `method` and `timestamp` (or `index`, the position in the series). `read_alerts`
-turns it into alarm positions per series and detector. Until the detectors of stream A deliver that file, two
-stand-in detectors run on the same series. Both use only the past: the residual of each hour is the value
-minus the median of the same hour of the last `PROFILE_WEEKS` weeks, then
+turns it into alarm positions per series and detector. The detector of stream A runs on the same series:
+
+* residual_conformal: `ResidualConformalDriftDetector` of `src.detector` with the settings of its multi-series
+  mode for a daily period. Its residual of an hour comes from an STL fit on a block that ends up to 23 hours
+  later, so an alarm is dated at the end of its block, the first hour at which it is known.
+
+Two stand-in detectors run next to it. Both use only the past: the residual of each hour is the value minus the
+median of the same hour of the last `PROFILE_WEEKS` weeks, then
 
 * profile_conformal: the deviation of the residual from the median of the last `CALIB` residuals is compared
   with a threshold, the 95% quantile of such deviations over the same window times a multiplier; an alarm
   needs two consecutive violations and is followed by a one-day cooldown (the rule of the stream A detector);
 * adwin: ADWIN (Bifet and Gavalda, 2007) on the same residuals, checked at every point.
 
-The multiplier and the ADWIN delta are calibrated per source on a control period without changes (synthetic:
+The multipliers and the ADWIN delta are calibrated per source on a control period without changes (synthetic:
 the control series, scenario "none"; seismic noise: the weeks between deployment and the first measures; ENTSO-E:
 the year 2019) to a target false alarm rate, one alarm per `TARGET_DAYS` days, so the methods are compared at the
 same false alarm rate. Settings calibrated on one source do not carry over to another (checked on 02.11.2026:
 the synthetic settings gave 6 times the target rate on the national load), hence the calibration per source.
 
-    python -m src.recommendations.alarms        # calibrate, run both on all series, write data/alerts/alerts.csv
+    python -m src.recommendations.alarms        # calibrate, run all on all series, write data/alerts/alerts.csv
+                                                # (about 18 minutes on 8 cores: the STL fits of the stream A detector)
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import time
+from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +45,7 @@ CALIB = 2 * WEEK
 TARGET_DAYS = 14
 MULT_GRID = (1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 5.0)
 DELTA_GRID = (0.3, 0.1, 0.03, 0.01, 0.003, 0.001, 3e-4, 1e-4, 3e-5, 1e-5, 1e-6)
+RESIDUAL_GRID = (1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0)
 
 
 def profile_residuals(y: np.ndarray, weeks: int = PROFILE_WEEKS) -> np.ndarray:
@@ -88,12 +97,165 @@ def adwin_alarms(r: np.ndarray, start: int, delta: float) -> pd.DataFrame:
     return pd.DataFrame(out, columns=["index", "score", "threshold"])
 
 
-DETECTORS = {"profile_conformal": (conformal_alarms, "mult", MULT_GRID), "adwin": (adwin_alarms, "delta", DELTA_GRID)}
+def residual_detector(mult: float = 1.0):
+    """The detector of stream A for hourly series with a daily period, with the settings of its multi-series mode."""
+    from src.detector.residual_detector import ResidualConformalDriftDetector
+    from src.detector.run_residual_detector_evaluation import get_detector_params
+
+    params = get_detector_params("", DAY, 10 ** 6, mode="multi")
+    params.pop("tolerance_window")
+    params["sensitivity_multiplier"] = mult
+    return ResidualConformalDriftDetector(seasonality_period=DAY, **params)
+
+
+def residual_scores(window: np.ndarray, local: np.ndarray | None, value: float, alpha: float) -> tuple[float, float, float, float]:
+    """The numbers the stream A detector compares at one position, computed as in its `fit_predict`: the deviation
+    of the residual `value` from the median of the calibration `window`, the conformal quantile of the deviations
+    inside the window (its threshold at multiplier 1), the shift of the mean of the `local` window from that median,
+    and the interquartile range of the local window over the one of the calibration window. `local` is None while
+    there are too few residuals for it; the last two rules are then off."""
+    med = np.median(window)
+    dev = np.abs(window - med)
+    q = int(np.clip(int(np.ceil((1.0 - alpha) * (len(dev) + 1))) - 1, 0, len(dev) - 1))
+    base = np.sort(dev)[q]
+    score = np.abs(value - med)
+    if local is None:
+        return float(score), float(base), 0.0, 0.0
+    shift = np.abs(np.mean(local) - med)
+    local_iqr = np.percentile(local, 75) - np.percentile(local, 25)
+    baseline_iqr = np.percentile(window, 75) - np.percentile(window, 25)
+    return float(score), float(base), float(shift), float(local_iqr / (baseline_iqr + 1e-8))
+
+
+def residual_violation(score, base, shift, iqr, mult: float, var_window: int):
+    """The three rules of `fit_predict` at multiplier `mult`, with its operations in its order (floats or arrays)."""
+    threshold = base * mult
+    return (score > threshold) | (shift > (threshold / np.sqrt(var_window)) * 1.35) | (iqr > (1.8 * mult))
+
+
+def block_end(i: int, first: int, step: int) -> int:
+    """The last position of the STL block of the stream A detector that holds position `i`: the first `first`
+    positions come from one warm-up fit, the later ones from fits on blocks of `step` positions."""
+    return first - 1 if i < first else first + ((i - first) // step + 1) * step - 1
+
+
+class ResidualStream:
+    """The stream A detector fed one value at a time. It repeats `fit_predict` of the detector block by block: the
+    residuals of a block of one period come from an STL fit on the history up to the end of that block, then every
+    position of the block is checked. An alarm is therefore returned with the last value of its block (`index`),
+    with the position that raised it in `detected`. On a whole series it gives the alarms of `fit_predict` that lie
+    in complete blocks, with the same scores and thresholds (checked in the tests)."""
+
+    def __init__(self, mult: float, start: int = 0):
+        d = residual_detector(mult)
+        self.d, self.mult, self.start = d, mult, start
+        self.first = max(2 * d.period, d.cal_window)                 # the warm-up decomposition of the detector
+        self.history = max(6 * d.period, 3 * d.cal_window)           # the history of its later decompositions
+        if d.cooldown_steps < d.causal_step:
+            raise ValueError("a block may hold two alarms: the cooldown is shorter than the block")
+        self.y: list[float] = []
+        self.r: list[float] = []
+        self.checked = d.cal_window  # the next position to check
+        self.run, self.last = 0, -d.cooldown_steps
+
+    def _check(self, i: int) -> dict | None:
+        d, r = self.d, self.r
+        local = np.asarray(r[i - d.var_window + 1: i + 1]) if i >= d.cal_window + d.var_window else None
+        score, base, shift, iqr = residual_scores(np.asarray(r[i - d.cal_window: i]), local, r[i], d.alpha)
+        self.run = self.run + 1 if residual_violation(score, base, shift, iqr, self.mult, d.var_window) else 0
+        if self.run >= d.min_consecutive and i - self.last >= d.cooldown_steps:
+            self.last, self.run = i, 0
+            return dict(detected=i, score=score, threshold=base * self.mult)
+        return None
+
+    def update(self, value: float) -> dict | None:
+        from statsmodels.tsa.seasonal import STL
+
+        d = self.d
+        self.y.append(float(value))
+        n = len(self.y)
+        if n < self.first or (n - self.first) % d.causal_step:
+            return None
+        if n == self.first:
+            self.r = list(STL(np.asarray(self.y), period=d.period, robust=d.robust).fit().resid)
+        else:
+            segment = np.asarray(self.y[max(0, n - self.history):])
+            self.r.extend(STL(segment, period=d.period, robust=d.robust).fit().resid[-d.causal_step:])
+        found = [a for a in (self._check(i) for i in range(self.checked, n)) if a is not None]
+        self.checked = n
+        if found and n - 1 >= self.start:
+            return dict(index=n - 1, **found[0])
+        return None
+
+
+_SCORES: dict[str, np.ndarray] = {}  # scores of the series seen last: the calibration asks for them once per grid value
+
+
+def _series_key(y: np.ndarray) -> str:
+    return hashlib.blake2b(np.asarray(y, dtype=float).tobytes(), digest_size=16).hexdigest()
+
+
+def warm_residual_scores(ys: list[np.ndarray], processes: int | None = None) -> None:
+    """Score tables of the stream A detector for many series, computed in parallel processes and kept for the
+    calls that follow: the STL fits take most of the time of a run (about 1 ms per hour of data on one core)."""
+    todo = {_series_key(y): np.asarray(y, dtype=float) for y in ys}
+    todo = sorted((y for k, y in todo.items() if k not in _SCORES), key=len, reverse=True)
+    if not todo:
+        return
+    with Pool(processes) as pool:
+        tables = pool.map(residual_score_table, todo, chunksize=1)
+    for y, table in zip(todo, tables):
+        _SCORES[_series_key(y)] = table
+
+
+def residual_score_table(y: np.ndarray) -> np.ndarray:
+    """`residual_scores` at every position of `y`, one row per position (NaN inside the first calibration window),
+    from the causal STL residuals of the stream A detector."""
+    y = np.asarray(y, dtype=float)
+    key = _series_key(y)
+    if key not in _SCORES:
+        d = residual_detector()
+        r = d._compute_causal_residuals(y)
+        out = np.full((len(y), 4), np.nan)
+        for i in range(d.cal_window, len(y)):
+            local = r[i - d.var_window + 1: i + 1] if i >= d.cal_window + d.var_window else None
+            out[i] = residual_scores(r[i - d.cal_window: i], local, r[i], d.alpha)
+        while len(_SCORES) >= 512:
+            _SCORES.pop(next(iter(_SCORES)))
+        _SCORES[key] = out
+    return _SCORES[key]
+
+
+def residual_conformal_alarms(y: np.ndarray, start: int, mult: float) -> pd.DataFrame:
+    """Alarms of the stream A detector on the series `y` at multiplier `mult`, each dated at the end of its STL
+    block (see `ResidualStream`), with the score and the threshold of `fit_predict`; alarms known before `start`
+    or only after the end of the series are dropped."""
+    d = residual_detector(mult)
+    if len(y) < d.period + d.cal_window:  # shorter than the detector accepts: nothing can be known yet
+        return pd.DataFrame(columns=["index", "score", "threshold"])
+    score, base, shift, iqr = residual_score_table(y).T
+    with np.errstate(invalid="ignore"):
+        viol = residual_violation(score, base, shift, iqr, mult, d.var_window)
+    first = max(2 * d.period, d.cal_window)
+    out, run, last = [], 0, -d.cooldown_steps
+    for i in range(d.cal_window, len(y)):
+        run = run + 1 if viol[i] else 0
+        if run >= d.min_consecutive and i - last >= d.cooldown_steps:
+            last, run = i, 0
+            known = block_end(i, first, d.causal_step)
+            if start <= known < len(y) and not (out and out[-1][0] == known):  # one alarm per block
+                out.append((known, float(score[i]), float(base[i] * mult)))
+    return pd.DataFrame(out, columns=["index", "score", "threshold"])
+
+
+DETECTORS = {"residual_conformal": (residual_conformal_alarms, "mult", RESIDUAL_GRID),
+             "profile_conformal": (conformal_alarms, "mult", MULT_GRID), "adwin": (adwin_alarms, "delta", DELTA_GRID)}
+ON_VALUES = ("residual_conformal",)  # detectors that take the series itself; the others take the profile residuals
 
 
 def alarms_in(method: str, y: np.ndarray, start: int, value: float) -> pd.DataFrame:
-    """Alarms of one detector on the profile residuals of `y` from position `start` on."""
-    return DETECTORS[method][0](profile_residuals(y), start, value)
+    """Alarms of one detector on `y` (the stand-ins: on its profile residuals) from position `start` on."""
+    return DETECTORS[method][0](y if method in ON_VALUES else profile_residuals(y), start, value)
 
 
 def alarms_of(method: str, s: dict, value: float) -> pd.DataFrame:
@@ -101,10 +263,11 @@ def alarms_of(method: str, s: dict, value: float) -> pd.DataFrame:
 
 
 class OnlineDetector:
-    """A stand-in detector fed one value at a time, for the monitoring service. It raises the same alarms as
+    """A detector fed one value at a time, for the monitoring service. It raises the same alarms as
     `alarms_in(method, y, start, value)` on the whole series (checked in the tests): the profile residual of a new
     value needs the same hour of the last `PROFILE_WEEKS` weeks, the conformal rule the last 2 `CALIB` residuals,
-    and ADWIN keeps its own state. Values before `start` only build up that history."""
+    ADWIN keeps its own state, and the stream A detector runs as `ResidualStream`. Values before `start` only
+    build up that history."""
 
     def __init__(self, method: str, value: float, start: int, weeks: int = PROFILE_WEEKS, calib: int = CALIB,
                  consecutive: int = 2, cooldown: int = DAY):
@@ -116,9 +279,12 @@ class OnlineDetector:
         self.r: list[float] = []
         self.run, self.last = 0, -cooldown  # state of the conformal rule (see `conformal_alarms`)
         self.adwin = None
+        self.stream = ResidualStream(value, start) if method == "residual_conformal" else None
 
     def update(self, value: float) -> dict | None:
         """Add the next value of the series; returns the alarm at its position (index, score, threshold) or None."""
+        if self.stream is not None:
+            return self.stream.update(value)
         i = len(self.y)
         self.y.append(float(value))
         past = [self.y[i - k * WEEK] for k in range(1, self.weeks + 1)] if i >= self.weeks * WEEK else [np.nan]
@@ -252,12 +418,14 @@ def main():
     p.add_argument("--seeds", type=int, default=3)
     p.add_argument("--no-real", action="store_true")
     p.add_argument("--target-days", type=int, default=TARGET_DAYS, help="calibration target: one false alarm per this many days")
+    p.add_argument("--processes", type=int, default=None, help="processes for the STL fits of the stream A detector (default: all cores)")
     args = p.parse_args()
 
     t = time.time()
     series = [] if args.no_real else entsoe_series(str(ENTSOE_FILE)) + seismic_series(str(SEISMIC_DIR))
     series += synthetic_series(fit_models(args.clients), list(range(args.seeds)))
     windows = control_windows(series, None if args.no_real else ENTSOE_FILE)
+    warm_residual_scores([s["y"] for s in series] + [y for w in windows.values() for y, _, _ in w], args.processes)
     params, rows = {}, []
     for source, w in windows.items():
         params[source] = {}
