@@ -110,6 +110,7 @@ def evaluate_residual_detector(
             df["timestamp"] = np.arange(len(df))
 
         dataset = item["dataset_name"]
+        series_id = item.get("series_id", "default_series")
         level = item["level"]
         drift_type = item["drift_type"]
         magnitude = item["magnitude_sigma"]
@@ -202,6 +203,7 @@ def evaluate_residual_detector(
 
         results.append({
             "dataset": dataset,
+            "series_id": series_id,
             "level": level,
             "drift_type": drift_type,
             "magnitude": magnitude,
@@ -221,7 +223,7 @@ def evaluate_residual_detector(
 
     results_df["detected"] = results_df["detected"].astype(float)
 
-    group_cols = ["dataset", "level", "drift_type", "magnitude", "method"]
+    group_cols = ["dataset", "series_id", "level", "drift_type", "magnitude", "method"]
     metric_cols = [
         "false_alarms",
         "far_per_1000",
