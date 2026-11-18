@@ -9,6 +9,8 @@ env/
 # Data files 
 data/raw/*
 data/processed/*
+!data/processed/multi_series_benchmark_manifest.json
+!data/processed/multi_series_detector_comparison_results.csv
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
