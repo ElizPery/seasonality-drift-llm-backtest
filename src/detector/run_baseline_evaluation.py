@@ -47,6 +47,7 @@ def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "ben
         df = pd.read_csv(file_path)
         level = item["level"]
         dataset_name = item["dataset_name"]
+        series_id = item.get("series_id", "default_series")
         n = len(df)
 
         for config in detectors_config:
@@ -66,6 +67,7 @@ def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "ben
 
                 results.append({
                     "dataset": dataset_name,
+                    "series_id": series_id,
                     "level": 1,
                     "drift_type": "none",
                     "magnitude": 0.0,
@@ -109,6 +111,7 @@ def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "ben
 
                 results.append({
                     "dataset": dataset_name,
+                    "series_id": series_id,
                     "level": 2,
                     "drift_type": item["drift_type"],
                     "magnitude": item["magnitude_sigma"],
@@ -163,6 +166,7 @@ def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "ben
 
                 results.append({
                     "dataset": dataset_name,
+                    "series_id": series_id,
                     "level": 3,
                     "drift_type": item["drift_type"],
                     "magnitude": 0.0,
@@ -179,7 +183,7 @@ def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "ben
     # Save results summary
     results_df = pd.DataFrame(results)
 
-    group_cols = ["dataset", "level", "drift_type", "magnitude", "method"]
+    group_cols = ["dataset", "series_id", "level", "drift_type", "magnitude", "method"]
     metric_cols = [
         "false_alarms",
         "far_per_1000",
