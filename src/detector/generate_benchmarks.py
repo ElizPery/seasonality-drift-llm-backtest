@@ -278,6 +278,11 @@ def generate_multi_series_benchmarks(datasets: Dict[str, Dict[str, Any]], data_d
                 print(f"    [Skipped] DriftGenerator initialization failed for {ds_name}-{series_id}: {e}")
                 continue
 
+            # If the period is not applicable (e.g., seismic data), fix zero strength
+            is_seasonal = isinstance(period, int) and period > 1
+            seas_strength = round(generator.seasonality_strength, 4) if is_seasonal else 0.0
+            seas_group = generator.seasonality_group if is_seasonal else "none"
+
             # -----------------------------------------------------------------
             # Level 1: Drift-Free Baseline Series (FAR Evaluation)
             # -----------------------------------------------------------------
@@ -295,7 +300,9 @@ def generate_multi_series_benchmarks(datasets: Dict[str, Dict[str, Any]], data_d
                     "drift_type": "none",
                     "magnitude_sigma": 0.0,
                     "change_point_idx": None,
-                    "seasonality_period": period
+                    "seasonality_period": period,
+                    "seasonality_strength": seas_strength,
+                    "seasonality_group": seas_group,
                 })
                 print(f"    [Level 1] Saved clean baseline -> {level1_filename}")
             except Exception as e:
@@ -330,7 +337,9 @@ def generate_multi_series_benchmarks(datasets: Dict[str, Dict[str, Any]], data_d
                                 "change_point_idx": drift_meta["change_point_idx"],
                                 "change_point_timestamp": str(drift_meta["change_point_timestamp"]),
                                 "absolute_delta": drift_meta["absolute_delta"],
-                                "seasonality_period": period
+                                "seasonality_period": period,
+                                "seasonality_strength": seas_strength,
+                                "seasonality_group": seas_group,
                             })
                         except Exception as e:
                             print(f"    [Error Level 2 ({d_type}, {mag}σ)] {e}")
@@ -359,7 +368,9 @@ def generate_multi_series_benchmarks(datasets: Dict[str, Dict[str, Any]], data_d
                     "magnitude_sigma": None,
                     "change_point_indices": ground_truth_cps,
                     "change_point_timestamps": gt_timestamps,
-                    "seasonality_period": period
+                    "seasonality_period": period,
+                    "seasonality_strength": seas_strength,
+                    "seasonality_group": seas_group,
                 })
                 print(f"    [Level 3] Saved annotated series ({len(ground_truth_cps)} change points) -> {level3_filename}")
 

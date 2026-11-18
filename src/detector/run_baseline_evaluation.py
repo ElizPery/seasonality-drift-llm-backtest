@@ -48,6 +48,8 @@ def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "ben
         level = item["level"]
         dataset_name = item["dataset_name"]
         series_id = item.get("series_id", "default_series")
+        seas_strength = item.get("seasonality_strength", np.nan)
+        seas_group = item.get("seasonality_group", "unknown")
         n = len(df)
 
         for config in detectors_config:
@@ -68,6 +70,8 @@ def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "ben
                 results.append({
                     "dataset": dataset_name,
                     "series_id": series_id,
+                    "seasonality_strength": seas_strength,
+                    "seasonality_group": seas_group,
                     "level": 1,
                     "drift_type": "none",
                     "magnitude": 0.0,
@@ -112,6 +116,8 @@ def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "ben
                 results.append({
                     "dataset": dataset_name,
                     "series_id": series_id,
+                    "seasonality_strength": seas_strength,
+                    "seasonality_group": seas_group,
                     "level": 2,
                     "drift_type": item["drift_type"],
                     "magnitude": item["magnitude_sigma"],
@@ -167,6 +173,8 @@ def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "ben
                 results.append({
                     "dataset": dataset_name,
                     "series_id": series_id,
+                    "seasonality_strength": seas_strength,
+                    "seasonality_group": seas_group,
                     "level": 3,
                     "drift_type": item["drift_type"],
                     "magnitude": 0.0,
