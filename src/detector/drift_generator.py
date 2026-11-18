@@ -33,6 +33,25 @@ class DriftGenerator:
         self.residuals = self.result.resid
         self.sigma = np.std(self.residuals)
 
+        # Calculate variance of seasonal and residual components
+        var_seas = np.var(self.seasonal)
+        var_resid = np.var(self.residuals)
+        var_seas_resid = var_seas + var_resid
+
+        # Compute seasonality strength (Hyndman et al.)
+        if var_seas_resid > 1e-12:
+            self.seasonality_strength = float(max(0.0, 1.0 - (var_resid / var_seas_resid)))
+        else:
+            self.seasonality_strength = 0.0
+
+        # Category by seasonality strength
+        if self.seasonality_strength < 0.30:
+            self.seasonality_group = "weak"
+        elif self.seasonality_strength < 0.65:
+            self.seasonality_group = "moderate"
+        else:
+            self.seasonality_group = "strong"
+
     def generate_level1_baseline(self, block_size: int = None) -> pd.DataFrame:
         """
         Level 1: Series without changes (FAR Evaluation).

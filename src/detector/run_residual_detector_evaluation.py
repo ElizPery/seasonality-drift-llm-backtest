@@ -111,6 +111,8 @@ def evaluate_residual_detector(
 
         dataset = item["dataset_name"]
         series_id = item.get("series_id", "default_series")
+        seas_strength = item.get("seasonality_strength", np.nan)
+        seas_group = item.get("seasonality_group", "unknown")
         level = item["level"]
         drift_type = item["drift_type"]
         magnitude = item["magnitude_sigma"]
@@ -204,6 +206,8 @@ def evaluate_residual_detector(
         results.append({
             "dataset": dataset,
             "series_id": series_id,
+            "seasonality_strength": seas_strength,
+            "seasonality_group": seas_group,
             "level": level,
             "drift_type": drift_type,
             "magnitude": magnitude,
