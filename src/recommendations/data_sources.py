@@ -61,7 +61,8 @@ def read_manifest(folder: str | Path = EXPORT_DIR) -> pd.DataFrame:
 def series_from_frame(row, frame: pd.DataFrame) -> dict:
     """The series of the experiments from its standard frame and manifest row: the feature table is rebuilt from the
     values with the calendar of the source (ENTSO-E: UTC stamps, features on the local clock of the country, yearly
-    terms; seismic noise: the local wall clock; synthetic: the nominal calendar from Monday 00:00), so the result is
+    terms; seismic noise and uploaded series: the clock of the stamps; synthetic: the nominal calendar from Monday
+    00:00), so the result is
     the same series that `entsoe_series`, `seismic_series` and `synthetic_series` give."""
     y = frame["value"].to_numpy(dtype=float)
     base = BASE_FEATURES
@@ -69,7 +70,7 @@ def series_from_frame(row, frame: pd.DataFrame) -> dict:
         local = pd.to_datetime(frame["timestamp"], utc=True).dt.tz_convert(ENTSOE_TZ[row["series"]])
         F = feature_table(y, local.dt.hour.to_numpy(), local.dt.dayofweek.to_numpy(), local.dt.dayofyear.to_numpy())
         base = BASE_FEATURES + YEARLY_FEATURES
-    elif row["source"] == "seismic":
+    elif row["source"] in ("seismic", "user"):  # the clock of the stamps as given (`user`: uploaded through the API)
         stamps = pd.to_datetime(frame["timestamp"])
         F = feature_table(y, stamps.dt.hour.to_numpy(), stamps.dt.dayofweek.to_numpy())
     else:

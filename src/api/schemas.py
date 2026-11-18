@@ -7,18 +7,50 @@ from pydantic import BaseModel, Field
 
 
 class SessionCreate(BaseModel):
-    series_id: str = Field(description="id of an exported series, source/series/scenario (see GET /series)",
+    series_id: str = Field(description="id of an exported or uploaded series, source/series/scenario (see GET /series)",
                            examples=["entsoe/PT/lockdown_2020"])
     strategy: str = Field("alarm_rules_gate", description="a strategy of the backtest (see GET /strategies)")
     detector: str | None = Field("residual_conformal", description="detector: residual_conformal (stream A) or adwin; "
                                  "needed by the strategies that review the model on alarms")
     detector_value: float | None = Field(None, description="its setting (multiplier or ADWIN delta); "
-                                         "default: the value calibrated for the source of the series")
+                                         "default: the value calibrated for the source of the series, or for the uploaded series itself")
     llm_model: str | None = Field(None, description="Instructor model string for the llm strategies")
     speed: float = Field(24.0, gt=0, le=10000, description="hours of data read per second of playing")
     skip_to_days_before_change: float | None = Field(7.0, ge=0, description="read the data from deployment up to this "
                                                      "many days before the change at once, then play; None: play from deployment")
     paused: bool = Field(False, description="create the session without starting to play")
+
+
+class SeriesUpload(BaseModel):
+    name: str = Field(description="name of the series: letters, digits, '_', '-' or '.'; the id becomes user/<name>/uploaded",
+                      examples=["shop_42"])
+    start: str = Field(description="time of the first value", examples=["2024-01-01 00:00"])
+    values: list[float] = Field(description="hourly values without gaps, in time order")
+    deploy_at: str = Field(description="the moment the forecasting model goes to work: the values before it are its "
+                           "history (at least 8 weeks), the values from it on are played by a session (at least 3 weeks)")
+    change_at: str | None = Field(None, description="a known moment of change after deploy_at, if there is one: the "
+                                  "session then also reports the error after it")
+    replace: bool = Field(False, description="replace an uploaded series with the same name")
+
+
+class DetectorSetting(BaseModel):
+    method: str
+    param: str
+    value: float
+    false_alarms_per_1000_hours: float = Field(description="reached on the control period of the series")
+    target_per_1000_hours: float
+    control_hours: int = Field(description="length of the control period: the hours before deploy_at after the warm-up")
+
+
+class SeriesInfo(BaseModel):
+    id: str = Field(description="the series_id for POST /sessions and POST /detect")
+    source: str
+    n: int
+    start: str
+    deploy_at: str
+    change_at: str | None
+    history_hours: int
+    detectors: list[DetectorSetting] = Field(description="detector settings calibrated on the history of the series")
 
 
 class SessionUpdate(BaseModel):

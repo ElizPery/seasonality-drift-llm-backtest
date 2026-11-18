@@ -12,6 +12,7 @@ services:
       GRAFANA_URL: http://localhost:3000
     volumes:
       - ./data/processed/series:/app/data/processed/series:ro
+      - uploads:/app/data/processed/uploads   # series added through POST /series
       - ./data/alerts:/app/data/alerts:ro
     ports:
       - "8000:8000"
@@ -62,3 +63,4 @@ services:
 
 volumes:
   db-data:
+  uploads:
