@@ -27,7 +27,9 @@
     │   │   ├── residual_detector.py    # STL decomposition + adaptive conformal intervals on residuals
     │   │   ├── generate_benchmarks.py
     │   │   ├── run_baseline_evaluation.py # Baseline metric runner 
-    │   │   └── run_residual_detector_evaluation.py # Residual conformal evaluation runner
+    │   │   ├── run_residual_detector_evaluation.py # Residual conformal evaluation runner
+    │   │   ├── common_evaluation.py    # One evaluation function for all detectors (score_alarms)
+    │   │   └── run_common_evaluation.py # Experiments on it: benchmark, real series, scores, run time
     │   │
     │   ├── recommendations/        # Stream B: LLM diagnostics and backtesting
     │   │   ├── forecast.py         # LightGBM day-ahead model, seasonal naive, MASE
@@ -191,6 +193,30 @@ To solve the alert fatigue problem common in seasonal time series (where traditi
   2. *Local Interquartile Range (IQR) dispersion* (detecting volatility and amplitude shifts).
 - **`run_residual_detector_evaluation.py`**: Executes the evaluation runner across the 3-level benchmark suite (Level 1 clean block-bootstrap series for False Alarm Rate, Level 2 semi-synthetic injected drifts across $0.5\sigma$ to $3\sigma$ magnitudes, and Level 3 real-world consensus datasets).
 - **`notebooks/02_residual_conformal_evaluation.ipynb`**: Interactive research notebook containing comparative visualizations, precision-recall breakdowns, and detection delay curves against traditional streaming and batch baselines (ADWIN, KS, PSI, Page-Hinkley, KSWIN, Wasserstein).
+
+#### One evaluation function for all detectors
+
+The two runners above score the alarms differently (a tolerance window of 50 points for the residual detector and
+40 points for the baselines; on level 2 the baselines get only the alarms before the change as false positives and
+their delay is measured to the first alarm after the change, also outside the window). `common_evaluation.py` has
+one function, `score_alarms`, for every detector: an alarm within 40 points after the change is the detection, the
+delay is measured to it, and every other alarm is a false positive. `run_common_evaluation.py` runs the
+experiments that use it:
+
+```bash
+python -m src.detector.run_common_evaluation benchmark   # five UCI clients: 15 series without changes (fixed seeds),
+                                                         # 60 injected changes; all detectors, the residual detector
+                                                         # at six multipliers and with one of its three scores at a time
+python -m src.detector.run_common_evaluation real        # 23 real hourly series (ENTSO-E load, seismic noise) with the
+                                                         # date of the first lockdown measures; needs python -m src.data.export
+python -m src.detector.run_common_evaluation timing      # run time of every detector on one series of 8760 points
+python -m src.detector.run_common_evaluation report      # summary tables and far_recall.png from the stored results
+python -m src.detector.run_common_evaluation             # all four steps (about half an hour on 16 cores)
+```
+
+The results are stored in `data/processed/common_evaluation`: `benchmark.csv`, `scores.csv`, `real.csv`,
+`timing.csv` and the figure `far_recall.png`. KSWIN of River compares a random sample of its window, so its alarms
+change from run to run; here it runs with 20 fixed seeds and the summary tables average over them.
 
 
 ## Stream B: Adaptation Strategies and Backtest (`src/recommendations`)
