@@ -9,9 +9,14 @@
     │   └── processed/              # Processed and synthetically labeled series
     │
     ├── notebooks/                  # Research Jupyter Notebooks for experiments
-    │   ├── 01_eda_and_baselines.ipynb
-    │   ├── 02_residual_conformal_evaluation.ipynb # Stream A: Residual conformal evaluation & visualization
-    │   └── 02_stream_b_baselines.ipynb  # Stream B: strategies, oracles, examples
+    │   ├── stream_a_01_eda_and_baselines.ipynb             # Stream A: EDA, decomposition, first benchmark on one series
+    │   ├── stream_a_02_residual_conformal_evaluation.ipynb # Stream A: Residual conformal evaluation & visualization
+    │   ├── stream_a_03_multi_series_residual_vs_baseline.ipynb # Stream A: benchmark on batches of series
+    │   ├── stream_a_04_statistical_testing_detector.ipynb  # Stream A: Friedman and Nemenyi tests
+    │   ├── stream_b_01_baselines.ipynb         # Stream B: strategies, oracles, examples
+    │   ├── stream_b_02_acceptance_rule.ipynb   # Stream B: the acceptance rule
+    │   ├── stream_b_03_statistical_tests.ipynb # Stream B: statistical comparison of the strategies
+    │   └── common_link_alarms_to_backtest.ipynb # Both streams: detector alarms in the backtest
     │
     ├── src/                        # Core service source code
     │   ├── __init__.py
@@ -192,7 +197,7 @@ To solve the alert fatigue problem common in seasonal time series (where traditi
   1. *Absolute residual deviation* (detecting sudden level shifts or mean changes).
   2. *Local Interquartile Range (IQR) dispersion* (detecting volatility and amplitude shifts).
 - **`run_residual_detector_evaluation.py`**: Executes the evaluation runner across the 3-level benchmark suite (Level 1 clean block-bootstrap series for False Alarm Rate, Level 2 semi-synthetic injected drifts across $0.5\sigma$ to $3\sigma$ magnitudes, and Level 3 real-world consensus datasets).
-- **`notebooks/02_residual_conformal_evaluation.ipynb`**: Interactive research notebook containing comparative visualizations, precision-recall breakdowns, and detection delay curves against traditional streaming and batch baselines (ADWIN, KS, PSI, Page-Hinkley, KSWIN, Wasserstein).
+- **`notebooks/stream_a_02_residual_conformal_evaluation.ipynb`**: Interactive research notebook containing comparative visualizations, precision-recall breakdowns, and detection delay curves against traditional streaming and batch baselines (ADWIN, KS, PSI, Page-Hinkley, KSWIN, Wasserstein).
 
 #### One evaluation function for all detectors
 
@@ -312,7 +317,7 @@ python -m pytest tests                                       # tests
 ```
 
 Results are written to `data/processed/stream_b/` (`runs.csv`, `summary.csv`, `oracle_picks.csv`, `tune.csv`,
-`example_*.csv`); tables and figures are in `notebooks/02_stream_b_baselines.ipynb`. The published results were
+`example_*.csv`); tables and figures are in `notebooks/stream_b_01_baselines.ipynb`. The published results were
 computed with Python 3.12, numpy 2.2.6, pandas 2.3.3, statsmodels 0.15.0 and lightgbm 4.7.0.
 
 #### Statistical comparison of the strategies
@@ -325,7 +330,7 @@ Holm correction check the comparisons behind the claims (the checked schedule ag
 and without the check and against doing nothing, retraining on alarm against the calendar, the best checked action
 against the weekly oracle). The groups are the national load, the seismic noise, both together, and each synthetic
 scenario; the ranking contains the 17 deployable strategies, the oracles and the seasonal naive forecast are
-references. `notebooks/05_stream_b_statistical_tests.ipynb` reads `runs.csv` and shows the tables and the critical
+references. `notebooks/stream_b_03_statistical_tests.ipynb` reads `runs.csv` and shows the tables and the critical
 difference diagrams.
 
 ## Monitoring Service (`src/api`, `src/monitoring`, Docker)
