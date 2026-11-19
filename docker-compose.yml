@@ -14,6 +14,7 @@ services:
       - ./data/processed/series:/app/data/processed/series:ro
       - uploads:/app/data/processed/uploads   # series added through POST /series
       - ./data/alerts:/app/data/alerts:ro
+      - ./data/demo/llm_answers:/app/data/llm_answers:ro   # stored LLM answers of the demo series
     ports:
       - "8000:8000"
     depends_on:
