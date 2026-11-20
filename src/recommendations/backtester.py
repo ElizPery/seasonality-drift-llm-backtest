@@ -99,10 +99,11 @@ ALARM_STRATEGIES = (
 
 # The gated alarm strategies with follow-up reviews. Right after a change the check has almost only old data and
 # cannot confirm a proposal; without a follow-up the model then waits for the next alarm, which may never come once
-# the detector is used to the new data. With `follow_up_days` the model is reviewed again every few days until the
-# check confirms a change, the advisor proposes to keep the model, or `follow_up_limit_days` have passed since the
-# review on the alarm (by then the two weeks of the check lie after the alarm). They are not part of `ALARM_STRATEGIES`,
-# so the experiments do not run them; the monitoring service and the demo do.
+# the detector is used to the new data. With `follow_up_days` a review on an alarm whose proposal the check did not
+# confirm is repeated every `follow_up_days` days until the model is changed or `follow_up_limit_days` have passed
+# since the review on the alarm (by then the two weeks of the check lie after the alarm). A follow-up in which the
+# advisor proposes to keep the model does not end the sequence. They are not part of `ALARM_STRATEGIES`, so the
+# experiments do not run them; the monitoring service and the demo do.
 FOLLOW_UP_STRATEGIES = (
     Strategy("alarm_rules_gate_follow", "on an alarm, rules with the backtest check and follow-up reviews", 7, "advised",
              advisor="rules", gate=True, trigger="alarm", follow_up_days=7),
