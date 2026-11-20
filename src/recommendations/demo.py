@@ -184,7 +184,7 @@ def review_table(events: list[dict], s: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def start_session(base_url: str = "http://localhost:8000", strategy: str = "alarm_llm_gate_follow", speed: float = 60.0,
+def start_session(base_url: str = "http://localhost:8000", strategy: str = "alarm_llm_gate", speed: float = 60.0,
                   path: str | Path = DEMO_CSV, llm_model: str | None = LLM_MODEL) -> dict | None:
     """Upload the demo series to the running service and start a session on it; returns the answer of the service
     (with `grafana_url`), or None with a hint if the service does not answer."""

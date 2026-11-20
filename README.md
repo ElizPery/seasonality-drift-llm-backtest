@@ -81,9 +81,9 @@ It needs no data download and no API key:
   the model (with a key and another series the same code asks the model).
 
 On this series the detector raises its first alarm 23 hours after the change. The backtest check stops the first
-proposal of the advisor, because one day of new data cannot confirm a gain; the follow-up reviews one and two weeks
-later bring the confirmation, and the model is changed 15 days after the change. The error after the change is 1.70
-against 3.44 for the model left as deployed (MASE), 51% lower.
+proposal of the advisor, because one day of new data cannot confirm a gain; the proposal after the next alarm, three
+weeks later, passes it, and the error after the change is 1.89 against 3.44 for the model left as deployed (MASE),
+45% lower. The strategy is `alarm_llm_gate`, one of the strategies of the experiments.
 
 The same series in the monitoring service with Grafana:
 
@@ -92,7 +92,7 @@ docker compose up --build -d                   # API, PostgreSQL, Prometheus, Gr
 python -m src.recommendations.demo session     # uploads the CSV, starts a session, prints the link to the dashboard
 ```
 
-The last cell of the notebook does the same. The session uses the strategy `alarm_llm_gate_follow`; the image of the service
+The last cell of the notebook does the same. The session uses the same strategy; the image of the service
 has no LLM client, so it takes the stored answers (`data/demo/llm_answers` is mounted into the container) and gives
 the numbers of the notebook. Any other hourly series can be uploaded in the same way (see "Your own series" below).
 
@@ -298,7 +298,7 @@ the check has almost only old data and cannot confirm a proposal; a strategy on 
 which may come late or not at all once the detector is used to the new data. With a follow-up, a review whose proposal
 the check did not confirm is repeated every 7 days (`follow_up_days`) until the model is changed, for at most 3 weeks
 after the review on the alarm; these reviews have the trigger `follow_up`. The strategies of the experiments are not
-changed and `run_backtest` does not run the new ones; the service and the demo use them. A check with the rule advisor
+changed and `run_backtest` does not run the new ones; they are an option of the service. A check with the rule advisor
 on the 263 series and both detectors: on the series without a change no model is changed and the reviews grow by 10%;
 on the series with a change the reviews grow by 10% to 100% and the model is changed on more series (level shift with
 the stream A detector: 70% of the series against 60%); the mean error after the change stays within 0.03 MASE of the

@@ -103,7 +103,7 @@ ALARM_STRATEGIES = (
 # confirm is repeated every `follow_up_days` days until the model is changed or `follow_up_limit_days` have passed
 # since the review on the alarm (by then the two weeks of the check lie after the alarm). A follow-up in which the
 # advisor proposes to keep the model does not end the sequence. They are not part of `ALARM_STRATEGIES`, so the
-# experiments do not run them; the monitoring service and the demo do.
+# experiments do not run them; they are an option of the monitoring service.
 FOLLOW_UP_STRATEGIES = (
     Strategy("alarm_rules_gate_follow", "on an alarm, rules with the backtest check and follow-up reviews", 7, "advised",
              advisor="rules", gate=True, trigger="alarm", follow_up_days=7),
