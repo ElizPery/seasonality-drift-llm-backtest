@@ -16,7 +16,8 @@
     │   ├── stream_b_01_baselines.ipynb         # Stream B: strategies, oracles, examples
     │   ├── stream_b_02_acceptance_rule.ipynb   # Stream B: the acceptance rule
     │   ├── stream_b_03_statistical_tests.ipynb # Stream B: statistical comparison of the strategies
-    │   └── common_link_alarms_to_backtest.ipynb # Both streams: detector alarms in the backtest
+    │   ├── common_link_alarms_to_backtest.ipynb # Both streams: detector alarms in the backtest
+    │   └── demo_one_series.ipynb               # Demo: the whole loop on one series, step by step
     │
     ├── src/                        # Core service source code
     │   ├── __init__.py
