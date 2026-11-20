@@ -53,7 +53,7 @@ def test_monitor_played_to_the_end_equals_the_backtest(name):
     assert np.array_equal(m.reference.pred, nothing["pred"], equal_nan=True)
 
 
-@pytest.mark.parametrize("name", ["alarm_retrain", "alarm_gate", "alarm_rules_gate"])
+@pytest.mark.parametrize("name", ["alarm_retrain", "alarm_gate", "alarm_rules_gate", "alarm_rules_gate_follow"])
 def test_monitor_with_the_stream_a_detector_equals_the_backtest(name):
     y, F = toy(shift=20, seed=1)
     s = series_dict(y, F)

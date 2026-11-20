@@ -14,7 +14,7 @@ import pytest
 from src.api.uploads import calibrate_on_history
 from src.recommendations import demo
 from src.recommendations.forecast import WEEK
-from src.recommendations.llm_client import LLMAdvisor, RuleAdvisor
+from src.recommendations.llm_client import LLMAdvisor
 from src.recommendations.monitor import Monitor
 
 
@@ -58,22 +58,24 @@ def test_loop_with_the_stored_llm_answers_needs_no_request_and_lowers_the_error(
     answers = tmp_path / "answers"  # a copy: the advisor writes failed requests into its folder
     shutil.copytree(demo.LLM_ANSWERS, answers)
     advisor = LLMAdvisor(demo.LLM_MODEL, cache_dir=answers, client=NoClient())
-    monitor = Monitor(series, "alarm_llm_gate", detector="residual_conformal", detector_value=multiplier,
+    monitor = Monitor(series, "alarm_llm_gate_follow", detector="residual_conformal", detector_value=multiplier,
                       advisors={"llm": advisor})
     events = monitor.advance(len(series["y"]))
-    assert advisor.calls == 0 and advisor.errors == 0
     change = series["t_change"]
     assert not [a for a in monitor.alarms if a < change] and monitor.alarms[0] - change < 24
     reviews = demo.review_table(events, series)
-    assert list(reviews["check"]) == ["not passed", "passed"]
-    assert list(reviews["applied"]) == ["keep", "retrain_8w"]
+    assert list(reviews["trigger"]) == ["alarm", "follow_up", "follow_up", "alarm"]
+    assert list(reviews["check"]) == ["not passed", "not passed", "passed", "passed"]
+    assert list(reviews["applied"]) == ["keep", "keep", "retrain_8w", "retrain_8w"]
+    assert (monitor.run.applied[0] - change) // 24 == 15  # the model is changed 15 days after the change
     with_system, without = monitor.mase(change)
-    assert without > 3 and with_system < 0.6 * without
+    assert without > 3 and with_system < 0.55 * without
 
-    rules = Monitor(series, "alarm_rules_gate", detector="residual_conformal", detector_value=multiplier,
-                    advisors={"rules": RuleAdvisor()})
-    rules.advance(len(series["y"]))
-    assert rules.mase(change)[0] < 0.6 * without
+    waiting = Monitor(series, "alarm_llm_gate", detector="residual_conformal", detector_value=multiplier,
+                      advisors={"llm": advisor})  # without follow-up reviews: the model waits for the second alarm
+    waiting.advance(len(series["y"]))
+    assert (waiting.run.applied[0] - change) // 24 == 22 and with_system < waiting.mase(change)[0] < 0.6 * without
+    assert advisor.calls == 0 and advisor.errors == 0  # both runs are covered by the stored answers
 
     figure = demo.plot_errors(series, {"model left as deployed": monitor.reference.pred, "system": monitor.run.pred},
                               monitor.scale, alarms=monitor.alarms, applied=monitor.run.applied)
