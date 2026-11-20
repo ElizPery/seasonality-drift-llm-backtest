@@ -6,7 +6,8 @@
     ├── .github/workflows/          # CI/CD pipelines (GitHub Actions for pytest)
     ├── data/                       # Directory for datasets
     │   ├── raw/                    # Raw data (Alibaba, UCI Electricity, TCPDBench, SeisBench)
-    │   └── processed/              # Processed and synthetically labeled series
+    │   ├── processed/              # Processed and synthetically labeled series
+    │   └── demo/                   # The series of the demo notebook and the stored LLM answers on it
     │
     ├── notebooks/                  # Research Jupyter Notebooks for experiments
     │   ├── 01_eda_and_baselines.ipynb
@@ -39,7 +40,8 @@
     │   │   ├── run_backtest.py     # Stream B runner
     │   │   ├── llm_client.py       # Instructor + Pydantic v2 schemas for LLM
     │   │   ├── alarms.py           # detector alarms: stream A detector and ADWIN (batch and online), alerts file
-    │   │   └── monitor.py          # Monitor: the decision loop as the data arrive (engine of the service)
+    │   │   ├── monitor.py          # Monitor: the decision loop as the data arrive (engine of the service)
+    │   │   └── demo.py             # Demo on one series: the series, figures, start of a session
     │   │
     │   ├── api/                    # MLOps microservice
     │   │   ├── __init__.py
@@ -64,6 +66,37 @@
     └── README.md                   # Project description and setup instructions
 ```
 
+
+## Demo on One Series
+
+`notebooks/demo_one_series.ipynb` takes one hourly series with a visible change through the whole system, one call at
+a time: the deployed forecasting model and its error, the detector of stream A, the diagnostics and the prompt of the
+advisor, the answer of the LLM, the backtest check, and the error with the system against the model left as deployed.
+It needs no data download and no API key:
+
+- the series is `data/demo/demo_seasonal_shift.csv`: a synthetic control series of the experiments whose weekly swing
+  becomes 2.5 times larger on 2 December 2013 (`python -m src.recommendations.demo series` writes it again from the
+  exported series);
+- the answers of the LLM advisor on this series are stored in `data/demo/llm_answers` and are read instead of asking
+  the model (with a key and another series the same code asks the model).
+
+On this series the detector raises its first alarm 23 hours after the change. The backtest check stops the first
+proposal of the advisor, because one day of new data cannot confirm a gain; the proposal after the next alarm, three
+weeks later, passes it, and the error after the change is 1.89 against 3.44 for the model left as deployed (MASE),
+45% lower. The strategy is `alarm_llm_gate`, one of the strategies of the experiments.
+
+The same series in the monitoring service with Grafana:
+
+```bash
+docker compose up --build -d                   # API, PostgreSQL, Prometheus, Grafana; works without the exported series
+python -m src.recommendations.demo session     # uploads the CSV, starts a session, prints the link to the dashboard
+```
+
+The last cell of the notebook does the same. The session uses the strategy `alarm_llm_gate`; the image of the service
+has no LLM client, so it takes the stored answers (`data/demo/llm_answers` is mounted into the container) and gives
+the numbers of the notebook. Any other hourly series can be uploaded in the same way (see "Your own series" below).
+
+![Grafana dashboard of the demo series](docs/images/grafana_demo_series.png)
 
 ## Data Source & Setup
 
