@@ -168,15 +168,14 @@ def plot_errors(s: dict, preds: dict[str, np.ndarray], scale: float, alarms=(), 
 
 
 def review_table(events: list[dict], s: dict) -> pd.DataFrame:
-    """The reviews of the model in the events of `Monitor.advance`: when and why (an alarm, or a follow-up of a
-    proposal that was not confirmed), what was proposed, what the check said (gain in MASE units with its 95%
-    interval) and what was applied."""
+    """The reviews of the model in the events of `Monitor.advance`: when, what was proposed, what the check said
+    (gain in MASE units with its 95% interval) and what was applied."""
     t, rows = stamps(s), []
     for e in events:
         if e["type"] != "decision":
             continue
         check = e["checks"][0] if e["checks"] else None
-        rows.append(dict(review=t[e["index"]], trigger=e["trigger"], proposed=e["proposal"],
+        rows.append(dict(review=t[e["index"]], proposed=e["proposal"],
                          gain=None if check is None else round(check["gain"], 3),
                          interval=None if check is None else f"[{check['lo']:+.3f}, {check['hi']:+.3f}]",
                          check=None if check is None else ("passed" if check["accepted"] else "not passed"),
@@ -184,7 +183,7 @@ def review_table(events: list[dict], s: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def start_session(base_url: str = "http://localhost:8000", strategy: str = "alarm_llm_gate_follow", speed: float = 60.0,
+def start_session(base_url: str = "http://localhost:8000", strategy: str = "alarm_llm_gate", speed: float = 60.0,
                   path: str | Path = DEMO_CSV, llm_model: str | None = LLM_MODEL) -> dict | None:
     """Upload the demo series to the running service and start a session on it; returns the answer of the service
     (with `grafana_url`), or None with a hint if the service does not answer."""

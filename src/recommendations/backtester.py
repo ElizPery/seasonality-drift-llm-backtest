@@ -63,8 +63,6 @@ class Strategy:
     gate: bool = False  # advised: apply the proposal only if the acceptance rule confirms it
     trigger: str = "calendar"  # calendar: every `cadence_days`; alarm: at the first origin after a detector alarm
     cooldown_days: int = 7  # alarm: alarms this soon after a review are ignored
-    follow_up_days: int | None = None  # alarm: review again this many days after a proposal the check did not confirm
-    follow_up_limit_days: int = 7 * (VAL_WEEKS + 1)  # ... for at most this many days after the review on the alarm
 
 
 STRATEGIES = (
@@ -94,21 +92,6 @@ ALARM_STRATEGIES = (
     Strategy("alarm_rules_gate", "on an alarm, rules on the diagnostics with the backtest check", 7, "advised", advisor="rules", gate=True, trigger="alarm"),
     Strategy("alarm_llm", "on an alarm, LLM, no backtest check", 7, "advised", advisor="llm", trigger="alarm"),
     Strategy("alarm_llm_gate", "on an alarm, LLM with the diagnostics and the backtest check", 7, "advised", advisor="llm", gate=True, trigger="alarm"),
-)
-
-
-# The gated alarm strategies with follow-up reviews. Right after a change the check has almost only old data and
-# cannot confirm a proposal; without a follow-up the model then waits for the next alarm, which may never come once
-# the detector is used to the new data. With `follow_up_days` a review on an alarm whose proposal the check did not
-# confirm is repeated every `follow_up_days` days until the model is changed or `follow_up_limit_days` have passed
-# since the review on the alarm (by then the two weeks of the check lie after the alarm). A follow-up in which the
-# advisor proposes to keep the model does not end the sequence. They are not part of `ALARM_STRATEGIES`, so the
-# experiments do not run them; the monitoring service and the demo do.
-FOLLOW_UP_STRATEGIES = (
-    Strategy("alarm_rules_gate_follow", "on an alarm, rules with the backtest check and follow-up reviews", 7, "advised",
-             advisor="rules", gate=True, trigger="alarm", follow_up_days=7),
-    Strategy("alarm_llm_gate_follow", "on an alarm, LLM with the backtest check and follow-up reviews", 7, "advised",
-             advisor="llm", gate=True, trigger="alarm", follow_up_days=7),
 )
 
 
@@ -185,16 +168,14 @@ class StrategyRun:
         self.last_change = t_deploy
         self.seen = None  # alarms consumed or ignored so far; set at the first step
         self.last_review = t_deploy - strategy.cooldown_days * DAY
-        self.follow_up = None  # (origin of the next follow-up review, position of its alarm, last origin allowed)
 
     def step(self, T: int, alarms: np.ndarray | None = None) -> dict | None:
         """The decision due at origin T (returns its record, or None if no decision was due), then the forecast
         of the day [T, T + 24). An alarm strategy reviews the model at the first origin after an alarm (alarms
         before the origin are known, the origin itself is not) and then ignores alarms for `cooldown_days`;
-        alarms before deployment are ignored. With `follow_up_days` a review whose proposal the check did not
-        confirm is repeated every `follow_up_days` days (trigger "follow_up" in the record)."""
+        alarms before deployment are ignored."""
         st = self.strategy
-        alarm, follow_up, opened = None, False, None
+        alarm = None
         if st.trigger == "alarm":
             alarms = np.asarray([] if alarms is None else alarms, dtype=int)
             if self.seen is None:
@@ -204,31 +185,19 @@ class StrategyRun:
                 self.seen = known
             due = known > self.seen
             if due:
-                opened, limit = int(alarms[known - 1]), T + st.follow_up_limit_days * DAY
+                alarm = dict(method=self.detector, hours_ago=int(T - alarms[known - 1]))
                 self.seen, self.last_review = known, T
-            elif self.follow_up is not None and T >= self.follow_up[0]:
-                due = follow_up = True
-                _, opened, limit = self.follow_up
-                self.last_review = T
-            if due:
-                alarm = dict(method=self.detector, hours_ago=int(T - opened))
         else:
             k = (T - self.t_deploy) // DAY
             due = bool(st.cadence_days) and k > 0 and k % st.cadence_days == 0
-        record = self._decide(T, alarm, follow_up) if due else None
-        if record is not None and st.trigger == "alarm":
-            # follow-up reviews start after a proposal that the check did not confirm and go on until the model is changed
-            again = T + (st.follow_up_days or 0) * DAY
-            pending = not record["changed"] and (follow_up or bool(record["checks"]))
-            self.follow_up = (again, opened, limit) if st.follow_up_days and pending and again <= limit else None
+        record = self._decide(T, alarm) if due else None
         rows = np.arange(T, T + DAY)
         self.pred[rows] = self.model.predict(self.F, rows)
         return record
 
-    def _decide(self, T: int, alarm: dict | None, follow_up: bool = False) -> dict:
+    def _decide(self, T: int, alarm: dict | None) -> dict:
         st, y, F, act = self.strategy, self.y, self.F, self.act
-        rec = dict(origin=T, trigger="follow_up" if follow_up else st.trigger, alarm=alarm, proposal=None, reason=None,
-                   checks=[], action="keep", fits=0)
+        rec = dict(origin=T, trigger=st.trigger, alarm=alarm, proposal=None, reason=None, checks=[], action="keep", fits=0)
         changed = False
         if st.policy == "fixed":
             self.model, fits = act(ACTIONS[st.action], self.model, T)
@@ -434,11 +403,10 @@ def _job(s, strategies=STRATEGIES, advisors: tuple[str, ...] = (), llm_model: st
 
 
 def sort_runs(df: pd.DataFrame) -> pd.DataFrame:
-    names = ["naive"] + [s.name for s in STRATEGIES + ADVISED_STRATEGIES + ALARM_STRATEGIES + FOLLOW_UP_STRATEGIES]
-    order = {name: i for i, name in enumerate(names)}
+    order = ["naive"] + [s.name for s in STRATEGIES + ADVISED_STRATEGIES + ALARM_STRATEGIES]
     if "detector" not in df:
         df = df.assign(detector=np.nan)
-    df = df.assign(_o=df.strategy.map(lambda name: order.get(name, len(order))), _d=df.detector.fillna(""))  # others last
+    df = df.assign(_o=df.strategy.map(order.index), _d=df.detector.fillna(""))
     return df.sort_values(["source", "scenario", "series", "_o", "_d"]).drop(columns=["_o", "_d"]).reset_index(drop=True)
 
 

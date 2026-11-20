@@ -17,11 +17,10 @@ import time
 import numpy as np
 
 from src.recommendations.alarms import OnlineDetector
-from src.recommendations.backtester import (ADVISED_STRATEGIES, ALARM_STRATEGIES, FOLLOW_UP_STRATEGIES, KINDS, STRATEGIES,
-                                            Strategy, StrategyRun)
+from src.recommendations.backtester import ADVISED_STRATEGIES, ALARM_STRATEGIES, KINDS, STRATEGIES, Strategy, StrategyRun
 from src.recommendations.forecast import DAY
 
-STRATEGY_BY_NAME = {st.name: st for st in STRATEGIES + ADVISED_STRATEGIES + ALARM_STRATEGIES + FOLLOW_UP_STRATEGIES}
+STRATEGY_BY_NAME = {st.name: st for st in STRATEGIES + ADVISED_STRATEGIES + ALARM_STRATEGIES}
 
 
 class Monitor:

@@ -6,13 +6,11 @@ import pytest
 from src.data.frames import series_table
 from src.recommendations.alarms import (DETECTORS, adwin_alarms, calibrate, control_windows, detect_all,
                                         false_alarm_rate, profile_residuals, read_alerts)
-from src.recommendations.backtester import (ALARM_STRATEGIES, FOLLOW_UP_STRATEGIES, STRATEGIES, StrategyRun, backtest,
-                                            evaluate_series)
+from src.recommendations.backtester import ALARM_STRATEGIES, STRATEGIES, backtest, evaluate_series
 from src.recommendations.forecast import BASE_FEATURES, DAY, WEEK
-from src.recommendations.llm_client import Recommendation
 from tests.test_backtester import N, T_CHANGE, T_DEPLOY, toy
 
-BY_NAME = {st.name: st for st in STRATEGIES + ALARM_STRATEGIES + FOLLOW_UP_STRATEGIES}
+BY_NAME = {st.name: st for st in STRATEGIES + ALARM_STRATEGIES}
 
 
 def series_dict(y, F, start="2013-09-02 00:00", **labels):
@@ -183,67 +181,3 @@ def test_residual_conformal_alarms_do_not_depend_on_later_values():
     r_full, r_cut = d._compute_causal_residuals(y), d._compute_causal_residuals(y[: k + 1])
     assert np.array_equal(r_cut[:complete], r_full[:complete])
     assert not np.allclose(r_cut[complete:], r_full[complete: k + 1])
-
-
-class FixedAdvisor:
-    """Proposes the same action at every review."""
-
-    name = "fixed"
-
-    def __init__(self, action):
-        self.action = action
-
-    def recommend(self, ctx, repeat=0):
-        return Recommendation(action=self.action, reason="fixed")
-
-
-def reviews_of(name, y, F, alarms, action="retrain_2w"):
-    run = StrategyRun(y, F, T_DEPLOY, BY_NAME[name], BASE_FEATURES, advisors={"rules": FixedAdvisor(action)}, detector="x")
-    for T in run.origins:
-        run.step(T, np.asarray(alarms))
-    return run
-
-
-def test_follow_up_reviews_repeat_an_unconfirmed_proposal_until_the_check_confirms_it():
-    y, F = toy(shift=30)
-    alarm = T_CHANGE + 5  # the only alarm, five hours after the change
-    plain = reviews_of("alarm_rules_gate", y, F, [alarm])
-    # one day after the change the check cannot confirm the retraining, and without another alarm nothing follows
-    assert [r["origin"] for r in plain.records] == [T_CHANGE + DAY] and plain.applied == []
-    follow = reviews_of("alarm_rules_gate_follow", y, F, [alarm])
-    origins = [r["origin"] for r in follow.records]
-    assert origins == [T_CHANGE + DAY, T_CHANGE + 8 * DAY, T_CHANGE + 15 * DAY]
-    assert [r["trigger"] for r in follow.records] == ["alarm", "follow_up", "follow_up"]
-    assert [r["alarm"]["hours_ago"] for r in follow.records] == [T - alarm for T in origins]
-    assert [r["changed"] for r in follow.records] == [False, False, True]
-    assert follow.applied == [T_CHANGE + 15 * DAY] and follow.decisions == 3 and follow.accepted == 1
-    changed = follow.applied[0]  # the same forecasts until the model is changed, better ones after it
-    assert np.array_equal(follow.pred[:changed], plain.pred[:changed], equal_nan=True)
-    rows = np.arange(changed, follow.end)
-    assert np.abs(y[rows] - follow.pred[rows]).mean() < np.abs(y[rows] - plain.pred[rows]).mean()
-
-
-def test_follow_up_reviews_stop_after_three_weeks_and_a_later_alarm_starts_over():
-    y, F = toy()  # no change: no retraining is confirmed
-    first = T_CHANGE + 5
-    alarms = [first, T_CHANGE + 3 * DAY, T_CHANGE + 10 * DAY, T_CHANGE + 30 * DAY + 5]  # two fall into the pause after a review
-    follow = reviews_of("alarm_rules_gate_follow", y, F, alarms)
-    days = [(r["origin"] - T_CHANGE) // DAY for r in follow.records]
-    assert days == [1, 8, 15, 22, 31]
-    assert [r["trigger"] for r in follow.records] == ["alarm", "follow_up", "follow_up", "follow_up", "alarm"]
-    assert follow.records[3]["alarm"]["hours_ago"] == T_CHANGE + 22 * DAY - first  # a follow-up belongs to its alarm
-    assert follow.applied == [] and follow.accepted == 0
-    nothing = backtest(y, F, T_DEPLOY, BY_NAME["nothing"], BASE_FEATURES)
-    assert np.array_equal(follow.pred, nothing["pred"], equal_nan=True)
-    # the same alarms without the follow-up: the strategy of the experiments reviews on alarms only
-    plain = reviews_of("alarm_rules_gate", y, F, alarms)
-    assert [(r["origin"] - T_CHANGE) // DAY for r in plain.records] == [1, 11, 31]
-    assert {r["trigger"] for r in plain.records} == {"alarm"}
-
-
-def test_follow_up_needs_a_proposal_that_the_check_did_not_confirm():
-    y, F = toy(shift=30)
-    keep = reviews_of("alarm_rules_gate_follow", y, F, [T_CHANGE + 5], action="keep")
-    assert len(keep.records) == 1 and keep.records[0]["checks"] == []  # the advisor keeps the model: nothing to follow up
-    assert {st.name for st in FOLLOW_UP_STRATEGIES}.isdisjoint(st.name for st in ALARM_STRATEGIES)  # not run by the experiments
-    assert all(st.follow_up_days is None for st in STRATEGIES + ALARM_STRATEGIES)
