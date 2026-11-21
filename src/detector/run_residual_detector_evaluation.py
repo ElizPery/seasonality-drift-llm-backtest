@@ -3,7 +3,7 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional
 from src.detector.residual_detector import ResidualConformalDriftDetector
-
+from src.detector.scoring import score_alerts_for_series
 
 # Separate parameter dictionaries for Single-Series vs. Multi-Series evaluation
 RESIDUAL_DETECTOR_CONFIGS: Dict[str, Dict[str, Dict[str, Any]]] = {
@@ -74,7 +74,7 @@ def get_detector_params(
         params["calibration_window"] = int(np.clip(max(3 * period, 36), 36, min(150, n_samples // 3)))
         params["variance_window"] = int(np.clip(period // 2, 6, 24))
         params["cooldown_steps"] = int(np.clip(period, 10, 40))
-        params["tolerance_window"] = int(np.clip(max(period, 15), 15, 50))
+        params["tolerance_window"] = 50
 
     return params
 
@@ -121,14 +121,7 @@ def evaluate_residual_detector(
         period = raw_period
         n_samples = len(df)
 
-        gt_cp = ground_truth_cp
         gt_cps = item.get("change_point_indices", [])
-        if gt_cp is not None:
-            ground_truth_cps = [gt_cp] if isinstance(gt_cp, int) else gt_cp
-        elif gt_cps:
-            ground_truth_cps = gt_cps
-        else:
-            ground_truth_cps = []
 
         # Fetch resolved parameters for current mode & dataset
         params = get_detector_params(
@@ -160,48 +153,20 @@ def evaluate_residual_detector(
 
         detected_indices = [alert["index"] for alert in alerts]
 
-        false_alarms = 0
-        detected = False
-        detection_delay = np.nan
-
-        if level == 1:
-            false_alarms = len(detected_indices)
-            far_per_1000 = (false_alarms / n_samples) * 1000 if n_samples > 0 else 0
-            precision, recall, f1 = 0.0, 0.0, 0.0
+        if ground_truth_cp is not None:
+            ground_truth_cps = [ground_truth_cp] if isinstance(ground_truth_cp, int) else ground_truth_cp
+        elif gt_cps:
+            ground_truth_cps = gt_cps
         else:
-            tp = 0
-            fp = 0
-            matched_gt = set()
-            delays = []
+            ground_truth_cps = []
 
-            for det_idx in sorted(detected_indices):
-                if not ground_truth_cps:
-                    fp += 1
-                    continue
-
-                valid_matches = [
-                    (gt, det_idx - gt)
-                    for gt in ground_truth_cps
-                    if gt not in matched_gt and 0 <= (det_idx - gt) <= tolerance_window
-                ]
-
-                if valid_matches:
-                    valid_matches.sort(key=lambda x: x[1])
-                    matched_gt_point, delay = valid_matches[0]
-                    tp += 1
-                    matched_gt.add(matched_gt_point)
-                    delays.append(delay)
-                else:
-                    fp += 1
-
-            fn = len(ground_truth_cps) - len(matched_gt) if ground_truth_cps else 1
-
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-            far_per_1000 = None
-            detection_delay = float(np.mean(delays)) if delays else np.nan
-            detected = len(matched_gt) > 0
+        metrics = score_alerts_for_series(
+            detected_indices=detected_indices,
+            level=level,
+            n_samples=n_samples,
+            ground_truth_cps=ground_truth_cps,
+            tolerance_window=tolerance_window,
+        )
 
         results.append({
             "dataset": dataset,
@@ -212,13 +177,7 @@ def evaluate_residual_detector(
             "drift_type": drift_type,
             "magnitude": magnitude,
             "method": "residual_conformal",
-            "false_alarms": fp if level != 1 else false_alarms,
-            "far_per_1000": far_per_1000,
-            "precision": precision,
-            "recall": recall,
-            "f1_score": f1,
-            "detection_delay": detection_delay,
-            "detected": detected,
+            **metrics,
         })
 
     results_df = pd.DataFrame(results)
