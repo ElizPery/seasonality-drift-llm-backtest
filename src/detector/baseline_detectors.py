@@ -155,7 +155,7 @@ class BaselineDetectorWrapper:
         elif self.method == "page_hinkley":
             detector = drift.PageHinkley(threshold=self.threshold)
         elif self.method == "kswin":
-            detector = drift.KSWIN(alpha=self.threshold, window_size=self.window_size)
+            detector = drift.KSWIN(alpha=self.threshold, window_size=self.window_size, seed=123)
         else:
             raise ValueError(f"Unsupported streaming method: '{self.method}'. Use 'adwin', 'page_hinkley', or 'kswin'.")
 

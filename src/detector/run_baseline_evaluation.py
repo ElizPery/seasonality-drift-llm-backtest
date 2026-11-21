@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics import precision_recall_fscore_support
 from src.detector.baseline_detectors import BaselineDetectorWrapper
+from src.detector.scoring import score_alerts_for_series
 
 
 def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "benchmark_manifest.json", output_file: str = "baseline_evaluation_results.csv"):
@@ -64,128 +65,39 @@ def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "ben
             alert_indices = [a["index"] for a in alerts]
 
             if level == 1:
-                # Level 1: Clean series (no drift anywhere, Y_true is all 0)
-                far = (len(alert_indices) / n) * 1000
-
-                results.append({
-                    "dataset": dataset_name,
-                    "series_id": series_id,
-                    "seasonality_strength": seas_strength,
-                    "seasonality_group": seas_group,
-                    "level": 1,
-                    "drift_type": "none",
-                    "magnitude": 0.0,
-                    "method": method_name,
-                    "false_alarms": len(alerts),
-                    "far_per_1000": round(far, 2),
-                    "precision": 0.0,
-                    "recall": 0.0,
-                    "f1_score": 0.0,
-                    "detection_delay": None
-                })
-                print(f"[Level 1 FAR] {method_name} on {dataset_name}: {far:.2f} alarms/1000 pts")
-
+                gt_cps = None
+                drift_type = "none"
+                magnitude = 0.0
             elif level == 2:
-                # Level 2: Event-based Precision, Recall, F1, and Delay evaluation
-                change_idx = item["change_point_idx"]
-                tolerance_window = 40  # Max steps allowed to catch the drift
-
-                # FP: Alerts triggered BEFORE the change point
-                fp_alerts = [idx for idx in alert_indices if idx < change_idx]
-                fp = len(fp_alerts)
-
-                # TP: Alert triggered within [change_idx, change_idx + tolerance_window]
-                post_change_alerts = sorted([idx for idx in alert_indices if change_idx <= idx])
-                
-                valid_alerts = [
-                    idx for idx in post_change_alerts 
-                    if idx <= change_idx + tolerance_window
-                ]
-
-                tp = 1 if valid_alerts else 0
-                fn = 0 if tp == 1 else 1
-
-                # Event-based Precision and Recall
-                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-                recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-                f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-
-                delay = (post_change_alerts[0] - change_idx) if post_change_alerts else None
-                detected = 1 if post_change_alerts else 0
-
-                results.append({
-                    "dataset": dataset_name,
-                    "series_id": series_id,
-                    "seasonality_strength": seas_strength,
-                    "seasonality_group": seas_group,
-                    "level": 2,
-                    "drift_type": item["drift_type"],
-                    "magnitude": item["magnitude_sigma"],
-                    "method": method_name,
-                    "detected": detected,
-                    "detection_delay": delay,
-                    "precision": round(precision, 2),
-                    "recall": round(recall, 2),
-                    "f1_score": round(f1, 2)
-                })
-
+                gt_cps = item.get("change_point_idx")
+                drift_type = item["drift_type"]
+                magnitude = item["magnitude_sigma"]
             elif level == 3:
-                ground_truth_cps = item.get("change_point_indices", [])
-                tolerance_window = 40  # Tolerance margin around each ground truth point
+                gt_cps = item.get("change_point_indices", [])
+                drift_type = item["drift_type"]
+                magnitude = 0.0
+            else:
+                continue
 
-                tp = 0
-                fp = 0
-                matched_gt = set()
-                delays = []
+            metrics = score_alerts_for_series(
+                detected_indices=alert_indices,
+                level=level,
+                n_samples=n,
+                ground_truth_cps=gt_cps,
+                tolerance_window=50,
+            )
 
-                for det in sorted(alert_indices):
-                    if not ground_truth_cps:
-                        fp += 1
-                        continue
-
-                    # Find valid matches where detection occurs AFTER or AT the change point
-                    # within the forward-looking tolerance window [gt, gt + tolerance_window]
-                    valid_matches = []
-                    for gt in ground_truth_cps:
-                        if gt not in matched_gt and 0 <= (det - gt) <= tolerance_window:
-                            valid_matches.append((gt, det - gt))
-
-                    if valid_matches:
-                        # Pick the closest valid ground truth point
-                        valid_matches.sort(key=lambda x: x[1])
-                        matched_gt_point, delay = valid_matches[0]
-                        
-                        tp += 1
-                        matched_gt.add(matched_gt_point)
-                        delays.append(delay)
-                    else:
-                        fp += 1
-
-                fn = len(ground_truth_cps) - len(matched_gt)
-
-                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-                recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-                f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-                mean_delay = float(np.mean(delays)) if delays else None
-
-                detected = 1 if len(matched_gt) > 0 else 0
-
-                results.append({
-                    "dataset": dataset_name,
-                    "series_id": series_id,
-                    "seasonality_strength": seas_strength,
-                    "seasonality_group": seas_group,
-                    "level": 3,
-                    "drift_type": item["drift_type"],
-                    "magnitude": 0.0,
-                    "method": method_name,
-                    "precision": round(precision, 2),
-                    "recall": round(recall, 2),
-                    "f1_score": round(f1, 2),
-                    "detected": detected,
-                    "detection_delay": round(mean_delay, 2) if mean_delay is not None else None
-                })
-                print(f"[Level 3] {method_name} on {dataset_name}: F1={f1:.2f}, Precision={precision:.2f}, Recall={recall:.2f}")
+            results.append({
+                "dataset": dataset_name,
+                "series_id": series_id,
+                "seasonality_strength": seas_strength,
+                "seasonality_group": seas_group,
+                "level": level,
+                "drift_type": drift_type,
+                "magnitude": magnitude,
+                "method": method_name,
+                **metrics,
+            })
 
 
     # Save results summary
