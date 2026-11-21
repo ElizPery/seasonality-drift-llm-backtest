@@ -68,6 +68,7 @@
     ├── Dockerfile                  # FastAPI service containerization
     ├── requirements-service.txt    # Dependencies of the service image
     ├── requirements.txt            # Python 3.11+ dependencies
+    ├── LICENSE                     # MIT License
     └── README.md                   # Project description and setup instructions
 ```
 
@@ -446,3 +447,10 @@ Not yet in the service: the LLM advisor inside the Docker image (the image has n
 `llm` strategies work with `llm_model`) and the model registry in MLflow. The detector of stream A runs in the service
 as `residual_conformal` (`ResidualStream` in `alarms.py` feeds it one value at a time; an alarm arrives at the end of
 its STL block, up to 23 hours after the hour that raised it).
+
+
+## License
+
+The code of this repository is released under the MIT License (see `LICENSE`). The datasets are not part of the
+repository and keep the licences of their sources, listed in "Data Source & Setup"; the series of the demo in
+`data/demo` is derived from the UCI ElectricityLoadDiagrams20112014 dataset (CC BY 4.0).
