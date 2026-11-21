@@ -67,10 +67,11 @@ class DriftGenerator:
         n = len(self.residuals)
         res_array = self.residuals.values
         bootstrap_resid = []
+        rng = np.random.default_rng(20)  # Fixed seed for reproducibility
 
         # Block bootstrap resampling loop
         while len(bootstrap_resid) < n:
-            start_idx = np.random.randint(0, n - block_size)
+            start_idx = rng.integers(0, n - block_size)
             block = res_array[start_idx : start_idx + block_size]
             bootstrap_resid.extend(block)
 
