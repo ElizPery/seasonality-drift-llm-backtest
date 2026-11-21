@@ -13,6 +13,7 @@ data/processed/*
 !data/processed/multi_series_detector_comparison_results.csv
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+!data/processed/stream_b/
 
 # Jupyter Notebook Checkpoints
 .ipynb_checkpoints/
@@ -28,6 +29,6 @@ mlruns/
 logs/
 *.log
 
-# Stored LLM answers (kept as a separate archive)
+# Stored LLM answers: the folders are unpacked from data/llm_answers.zip, which is kept in git
 data/llm_answers/
 data/llm_probe/
