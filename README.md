@@ -1,88 +1,49 @@
-## Repository Structure
+# Seasonality-Aware Drift Detection and Backtest-Verified Recommendations
 
-```text
-    seasonality-drift-llm-mlops/
-    │
-    ├── data/                       # Directory for datasets
-    │   ├── raw/                    # Raw data (Alibaba, UCI Electricity, TCPDBench, SeisBench)
-    │   ├── processed/              # Processed and synthetically labeled series; stream_b/ holds the results of stream B
-    │   ├── llm_answers/            # Stored answers of the LLM advisors, unpacked from the archive (not in git)
-    │   └── demo/                   # The series of the demo notebook and the stored LLM answers on it
-    │
-    ├── notebooks/                  # Research Jupyter Notebooks for experiments
-    │   ├── 01_eda_and_baselines.ipynb
-    │   ├── 02_residual_conformal_evaluation.ipynb # Stream A: Residual conformal evaluation & visualization
-    │   └── 02_stream_b_baselines.ipynb  # Stream B: strategies, oracles, examples
-    │
-    ├── src/                        # Core service source code
-    │   ├── __init__.py
-    │   ├── data/                   # Shared by both streams: loaders, the standard frame, the manifest
-    │   │   ├── uci.py, entsoe.py, seismic_noise.py, alibaba.py, tcpd.py, iquique.py   # one loader per source
-    │   │   ├── frames.py           # standard frame (timestamp, value), series_table, write_series
-    │   │   ├── loader.py           # DataLoader class interface used by stream A
-    │   │   └── export.py           # python -m src.data.export: the stream B series as CSV + manifest.csv
-    │   ├── detector/               # Stream A: Drift detectors and decomposition
-    │   │   ├── data_loader.py          # Kept import path of DataLoader (the loaders live in src/data)
-    │   │   ├── drift_generator.py      # STL decomposition + 3-level benchmark generation
-    │   │   ├── baseline_detectors.py   # KS, PSI, ADWIN, Page-Hinkley, KSWIN (River / SciPy)
-    │   │   ├── residual_detector.py    # STL decomposition + adaptive conformal intervals on residuals
-    │   │   ├── generate_benchmarks.py
-    │   │   ├── run_baseline_evaluation.py # Baseline metric runner 
-    │   │   └── run_residual_detector_evaluation.py # Residual conformal evaluation runner
-    │   │
-    │   ├── recommendations/        # Stream B: LLM diagnostics and backtesting
-    │   │   ├── forecast.py         # LightGBM day-ahead model, seasonal naive, MASE
-    │   │   ├── catalog.py          # Remediation action catalog
-    │   │   ├── backtester.py       # Strategies, hindsight oracles, block bootstrap CI of the MASE gain
-    │   │   ├── synthetic.py        # Synthetic series from UCI clients (MSTL control series + injected changes)
-    │   │   ├── data_sources.py     # ENTSO-E and seismic noise series with features and labels (loaders in src/data)
-    │   │   ├── plots.py            # Figures for the stream B notebook
-    │   │   ├── run_backtest.py     # Stream B runner
-    │   │   ├── stats_tests.py      # Rank tests over the series (Friedman, Nemenyi, Wilcoxon with Holm)
-    │   │   ├── strata.py           # Groups of series by seasonal strength
-    │   │   ├── llm_report.py       # LLM advisors on the real series: paired tests, action shares, figure
-    │   │   ├── prompt_probe.py     # Probe of the prompt wording
-    │   │   ├── llm_client.py       # Instructor + Pydantic v2 schemas for LLM
-    │   │   ├── alarms.py           # detector alarms: stream A detector and ADWIN (batch and online), alerts file
-    │   │   ├── monitor.py          # Monitor: the decision loop as the data arrive (engine of the service)
-    │   │   └── demo.py             # Demo on one series: the series, figures, start of a session
-    │   │
-    │   ├── api/                    # MLOps microservice
-    │   │   ├── __init__.py
-    │   │   ├── main.py             # FastAPI application (sessions, /detect, /recommendations, /metrics)
-    │   │   ├── sessions.py         # sessions playing a series in the background
-    │   │   ├── store.py            # history of the sessions in PostgreSQL (for Grafana)
-    │   │   ├── uploads.py          # upload of your own series
-    │   │   └── schemas.py          # Pydantic schemas for API requests/responses
-    │   │
-    │   └── monitoring/             # Infrastructure integration
-    │       ├── __init__.py
-    │       └── metrics.py          # Prometheus metrics (prometheus_client)
-    │
-    ├── tests/                      # Automated tests (Pytest)
-    │   └── test_*.py               # data, alarms, backtester, LLM client, monitor, API, demo, statistical tests
-    │
-    ├── docs/images/                # Figures of the README
-    ├── deploy/                     # Prometheus configuration, Grafana data sources and dashboards
-    ├── docker-compose.yml          # Local deployment (FastAPI, PostgreSQL, Prometheus, Grafana)
-    ├── Dockerfile                  # FastAPI service containerization
-    ├── requirements-service.txt    # Dependencies of the service image
-    ├── requirements.txt            # Python 3.11+ dependencies
-    ├── LICENSE                     # MIT License
-    └── README.md                   # Project description and setup instructions
+Forecasting models of seasonal time series degrade when the data change, and two questions follow: has the series
+really changed, or does it only follow its daily and weekly cycle, and what should be done with the model after an
+alarm. This repository answers both in one system, built as a master's project of two students:
+
+- **Stream A, detection** (Yelyzaveta Pereriadkina, `src/detector`): a seasonality-aware drift detector that watches
+  the residuals of a causal STL decomposition with conformal thresholds, and a three-level benchmark that compares it
+  with six classical detectors on series without changes, with injected changes and with annotated real changes.
+- **Stream B, decisions** (Oleg Zadorozhnyi, `src/recommendations`, `src/api`): what to do after an alarm. An advisor
+  (fixed rules or a language model) proposes one action from a catalog, a backtest on recent data applies the action
+  only if its gain is confirmed, and the strategies are compared on 263 series; a monitoring service takes the same
+  decisions on a stream of new data and shows them in Grafana.
+- **Shared**: the data loaders and the standard frame (`src/data`), the link of the stream A detector to the decisions
+  of stream B (`src/recommendations/alarms.py`) and a demo that takes one series through the whole system.
+
+## Quick Start
+
+```bash
+git clone https://github.com/ElizPery/seasonality-drift-llm-backtest.git
+cd seasonality-drift-llm-backtest
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python -m pytest tests     # without any data: 68 pass, 2 skip (they need the exported series and the stored LLM answers)
 ```
 
+Without any data download you can then run the demo on one series (below) and, from the stored results, the notebook
+`stream_a_04_statistical_testing_detector` and the notebooks of stream B (two of them except one example that loads
+raw data, see "Stored results").
+`bash run_pipeline.sh` downloads the data of stream B, runs the tests and the backtest and starts the monitoring
+service. "Reproducing the Results" at the end lists what each step needs.
 
 ## Architecture
 
-![Components and data flow](docs/images/architecture.png)
+![Components of both streams and the flow of data between them](docs/images/architecture.png)
 
-The loaders of `src/data` turn every source into the standard frame (`timestamp`, `value`). The decision loop of
-`src/recommendations` is the same code in both uses: the backtest replays it over the 263 series of the experiments
-and writes the results to CSV, and the monitoring service plays one series hour by hour and shows the same decisions
-in Grafana. The LLM advisor is reached through a gateway (OpenRouter); every answer is stored, so a rerun reads the
-stored answers.
-
+Both streams read their data through `src/data`, which turns every source into the standard frame (`timestamp`,
+`value`). Stream A builds a benchmark from these series, runs its residual conformal detector and six classical
+detectors on it, scores all of them with one function and tests the differences; its result is one table with a row
+per detector and benchmark series. Stream B keeps a day-ahead forecasting model for each of its 263 series and reviews
+it on a weekly calendar or on the alarms of a detector: the detector of stream A, fed one value at a time, or ADWIN as
+the reference. At a review an advisor proposes an action from the catalog and the acceptance rule replays it on the
+last two weeks. The decision loop is the same code in both uses: the backtest replays it over the history of every
+series and writes the results to CSV, and the monitoring service plays one series hour by hour and shows the same
+decisions in Grafana. The language model advisor is reached through a gateway (OpenRouter); every answer is stored,
+so a rerun reads the stored answers.
 
 ## Demo on One Series
 
@@ -115,11 +76,106 @@ the numbers of the notebook. Any other hourly series can be uploaded in the same
 
 ![Grafana dashboard of the demo series](docs/images/grafana_demo_series.png)
 
-## Data Source & Setup
+## Repository Structure
 
-### 1. UCI ElectricityLoadDiagrams 2011–2014 (`LD2011_2014.txt`)
+```text
+    seasonality-drift-llm-backtest/
+    │
+    ├── data/
+    │   ├── raw/                    # Raw data, not in git (see "Data Sources and Setup")
+    │   ├── processed/              # Generated series and results; in git: the results of stream A
+    │   │                           #   (multi_series_*) and of stream B (stream_b/)
+    │   ├── alerts/                 # Alarms of the detectors on the stream B series and their calibrated settings
+    │   ├── demo/                   # The series of the demo and the stored LLM answers on it
+    │   └── llm_answers/            # Stored answers of the LLM advisors, unpacked from the archive (not in git)
+    │
+    ├── notebooks/
+    │   ├── stream_a_01_eda_and_baselines.ipynb              # A: data, STL, single-series benchmark, baselines
+    │   ├── stream_a_02_residual_conformal_evaluation.ipynb  # A: the detector on the single-series benchmark
+    │   ├── stream_a_03_multi_series_residual_vs_baseline.ipynb # A: multi-series benchmark, all seven detectors
+    │   ├── stream_a_04_statistical_testing_detector.ipynb   # A: Friedman and Nemenyi tests
+    │   ├── stream_b_01_baselines.ipynb             # B: reference strategies, hindsight oracles, examples
+    │   ├── stream_b_02_acceptance_rule.ipynb       # B: the acceptance rule and the advisors
+    │   ├── stream_b_03_statistical_tests.ipynb     # B: rank tests of the strategies
+    │   ├── common_link_alarms_to_backtest.ipynb    # A + B: detector alarms in the backtest
+    │   └── demo_one_series.ipynb                   # A + B: the whole loop on one series, step by step
+    │
+    ├── src/
+    │   ├── data/                   # Shared by both streams: loaders, the standard frame, the manifest
+    │   │   ├── uci.py, entsoe.py, seismic_noise.py, alibaba.py, tcpd.py, iquique.py   # one loader per source
+    │   │   ├── frames.py           # standard frame (timestamp, value), series_table, write_series
+    │   │   ├── loader.py           # DataLoader class interface used by stream A
+    │   │   └── export.py           # python -m src.data.export: the stream B series as CSV + manifest.csv
+    │   │
+    │   ├── detector/               # Stream A: detection and its evaluation
+    │   │   ├── residual_detector.py    # ResidualConformalDriftDetector: causal STL residuals, conformal thresholds
+    │   │   ├── baseline_detectors.py   # KS, PSI, Wasserstein (windows); ADWIN, Page-Hinkley, KSWIN (River)
+    │   │   ├── drift_generator.py      # STL, seasonal strength, series without changes, injected changes
+    │   │   ├── generate_benchmarks.py  # the three-level benchmark: one series per source or batches of series
+    │   │   ├── run_baseline_evaluation.py          # the baselines on a benchmark manifest
+    │   │   ├── run_residual_detector_evaluation.py # the detector on a benchmark manifest, settings per source
+    │   │   ├── scoring.py              # one scoring function for all detectors
+    │   │   ├── statistical_tests.py    # Friedman test and Nemenyi post-hoc test
+    │   │   └── data_loader.py          # kept import path of DataLoader (the loaders live in src/data)
+    │   │
+    │   ├── recommendations/        # Stream B: forecasting model, decisions, backtest
+    │   │   ├── forecast.py         # LightGBM day-ahead model, seasonal naive, MASE
+    │   │   ├── catalog.py          # catalog of corrective actions
+    │   │   ├── backtester.py       # strategies, hindsight oracles, acceptance rule, block bootstrap CI of the gain
+    │   │   ├── synthetic.py        # synthetic series from UCI clients (MSTL control series + injected changes)
+    │   │   ├── data_sources.py     # ENTSO-E and seismic noise series with features and labels
+    │   │   ├── alarms.py           # detector alarms: stream A detector and ADWIN (batch and online), alerts file
+    │   │   ├── llm_client.py       # diagnostics, prompts, answer schema, rule-based and LLM advisors
+    │   │   ├── run_backtest.py     # stream B runner
+    │   │   ├── stats_tests.py      # rank tests over the series (Friedman, Nemenyi, Wilcoxon with Holm)
+    │   │   ├── strata.py           # groups of series by seasonal strength
+    │   │   ├── llm_report.py       # LLM advisors on the real series: paired tests, action shares, figure
+    │   │   ├── prompt_probe.py     # probe of the prompt wording
+    │   │   ├── plots.py            # figures of the stream B notebooks
+    │   │   ├── monitor.py          # Monitor: the decision loop as the data arrive (engine of the service)
+    │   │   └── demo.py             # demo on one series: the series, figures, start of a session
+    │   │
+    │   ├── api/                    # Monitoring service (FastAPI)
+    │   │   ├── main.py             # application: sessions, series, /detect, /recommendations, /metrics
+    │   │   ├── sessions.py         # sessions playing a series in the background
+    │   │   ├── uploads.py          # upload of your own series
+    │   │   ├── store.py            # history of the sessions in PostgreSQL (for Grafana)
+    │   │   └── schemas.py          # Pydantic schemas of requests and answers
+    │   │
+    │   └── monitoring/
+    │       └── metrics.py          # Prometheus metrics (prometheus_client)
+    │
+    ├── tests/                      # Automated tests (pytest): data, alarms, backtester, LLM client, monitor, API,
+    │                               #   demo, statistical tests
+    ├── deploy/                     # Prometheus configuration, Grafana data sources and dashboards
+    ├── docs/images/                # Figures of the README
+    ├── docker-compose.yml          # API, PostgreSQL, Prometheus, Grafana
+    ├── Dockerfile                  # image of the API
+    ├── requirements.txt            # dependencies of the experiments, the service and the tests (Python 3.12)
+    ├── requirements-service.txt    # dependencies of the service image
+    ├── run_pipeline.sh             # data of stream B, tests, backtest and service in one command
+    ├── LICENSE                     # MIT License
+    └── README.md
+```
 
-A classic benchmark time-series dataset containing electricity consumption data for 370 clients sampled at 15-minute intervals.
+## Data Sources and Setup
+
+| # | Dataset | Used by | Location |
+|---|---------|---------|----------|
+| 1 | UCI ElectricityLoadDiagrams 2011-2014 | stream A (benchmark), stream B (synthetic series) | `data/raw/LD2011_2014.txt` |
+| 2 | Alibaba Cluster Trace 2018 (Zenodo slice) | stream A | `data/raw/alibaba_cluster_trace.csv` |
+| 3 | Turing Change Point Dataset (TCPD) | stream A (annotated real changes) | `data/raw/tcpd/` |
+| 4 | SeisBench Iquique | stream A (single-series benchmark only) | downloaded by `seisbench` |
+| 5 | ENTSO-E national load (Open Power System Data) | stream B | `data/raw/opsd/` |
+| 6 | Seismic noise during the 2020 lockdowns | stream B | `data/raw/seismic_noise/` |
+
+`bash run_pipeline.sh data` downloads datasets 1, 5 and 6.
+
+### 1. UCI ElectricityLoadDiagrams 2011-2014 (`LD2011_2014.txt`)
+
+A classic benchmark time-series dataset containing electricity consumption data for 370 clients sampled at 15-minute
+intervals. Stream A uses five clients of 2013 (and the client MT_200 in the single-series benchmark); stream B builds
+its synthetic series from the seasonal profiles of 20 clients.
 
 * **Official Source:** [UCI Machine Learning Repository - ElectricityLoadDiagrams20112014](https://archive.ics.uci.edu/dataset/321/electricityloaddiagrams20112014)
 * **Direct Download:** [UCI Zip Archive (249 MB)](https://archive.ics.uci.edu/static/public/321/electricityloaddiagrams20112014.zip)
@@ -132,10 +188,10 @@ A classic benchmark time-series dataset containing electricity consumption data 
    ```
 3. The `load_uci_electricity()` method in `DataLoader` will automatically read and standardize this file.
 
-
 ### 2. Alibaba Cluster Trace 2018 (`alibaba_cluster_trace.csv`)
 
-The raw Alibaba trace is large and resource-intensive to parse from scratch. For faster setup, use the pre-aggregated and cleaned open-access slice provided on Zenodo.
+The raw Alibaba trace is large and resource-intensive to parse from scratch. For faster setup, use the pre-aggregated
+and cleaned open-access slice provided on Zenodo.
 
 * **Dataset Repository:** [DataCenter-Traces-Datasets on Zenodo](https://zenodo.org/records/14564935)
 * **Target File:** `machine_usage_days_1_to_8_grouped_300_seconds.csv` (~200 KB)
@@ -144,35 +200,38 @@ The raw Alibaba trace is large and resource-intensive to parse from scratch. For
 1. Navigate to the Zenodo dataset page linked above.
 2. Download `machine_usage_days_1_to_8_grouped_300_seconds.csv`.
 3. Save and rename the file into your local project directory:
-```path
+   ```path
    data/raw/alibaba_cluster_trace.csv
    ```
-4. The `load_alibaba_standard_trace()` method in `DataLoader` will automatically parse this aggregated CPU/memory usage trace.
+4. The `load_alibaba_standard_trace()` and `load_alibaba_batch()` methods in `DataLoader` read this aggregated
+   CPU, memory and network usage trace.
 
-### 3. TCPDBench Dataset (`jfk_passengers` / Level 3 Benchmark)
+### 3. Turing Change Point Dataset (TCPD, level 3 of the benchmark)
 
-TCPDBench (Time Series Change Point Benchmarks) contains real-world time series datasets with various change points and conceptual drift, which serve as the Level 3 benchmark for validating drift detectors.
+Real time series in which several annotators marked the change points independently (van den Burg and Williams,
+2020). The annotated series serve as level 3 of the benchmark of stream A: JFK passengers, Iceland tourism and US
+population, each scored against one annotator.
 
-- **Official Repository:** [GitHub - TCPDBench/TCPDBench](https://github.com/TimeSeriesAI/TCPDBench)
-- **Target File:** E.g., `jfk_passengers.csv` or specific series files from the benchmark repository.
+- **Dataset and annotations:** [GitHub - alan-turing-institute/TCPD](https://github.com/alan-turing-institute/TCPD)
+- **Benchmark of change point methods:** [GitHub - alan-turing-institute/TCPDBench](https://github.com/alan-turing-institute/TCPDBench)
 
 #### Setup Instructions:
-1. Download the required time series files from the TCPDBench repository.
-2. Place them into your project's raw data directory:
-   ```path
-   data/raw/tcpd/
-   ```
-3. The loading method in `DataLoader` will automatically read and prepare the Level 3 series for detector evaluation.
+1. Save each series as `data/raw/tcpd/<name>.csv` with a column `value` (and optionally `timestamp`).
+2. Save the annotations of the TCPD repository as `data/raw/tcpd/annotations.json`.
+3. `load_tcpd_annotated_series()` and `load_tcpd_batch()` in `DataLoader` read a series and the change points of the
+   chosen annotator.
 
 ### 4. SeisBench Iquique Seismic Trace Dataset
 
-SeisBench provides standardized seismic datasets for machine learning applications in seismology. The Iquique seismic trace dataset (focusing on P-wave arrivals with ground-truth change points) is used to evaluate drift and abrupt change detection under high-noise geophysical signal conditions.
+SeisBench provides standardized seismic datasets for machine learning applications in seismology. A waveform of the
+Iquique dataset with a picked P-wave arrival as the change point was used in the exploratory runs and in the
+single-series benchmark of stream A; a waveform has no seasonal period, so the residual detector is not run on it.
 
 - **Official Source / Toolkit:** [GitHub - SeisBench/seisbench](https://github.com/seisbench/seisbench)
-- **Dataset Focus:** Iquique regional seismic network, P-wave picks, and event-based change points.
 
 #### Setup Instructions:
-1. The corresponding loading method in `DataLoader` will automatically ingest the seismic waveform slice, parse the ground-truth change points and prepare it for seasonal-trend drift evaluation.
+1. `seisbench` is installed with `requirements.txt`; `load_seismic_dataset()` in `DataLoader` downloads the dataset on
+   first use and picks a waveform with valid arrivals.
 
 ### 5. ENTSO-E National Load (Open Power System Data), Stream B
 
@@ -210,8 +269,7 @@ for f in BE.UCC..HHZ IV.MILN..HHZ IV.FIR..HHZ FR.CURIE.00.HHZ GB.EDI..HHZ NL.ALK
 done
 ```
 
-
-## Shared data loading (`src/data`)
+## Shared Data Loading (`src/data`)
 
 Both streams read their data through `src/data`. Every loader returns the same standard frame: a DataFrame
 with the columns `timestamp` (start of the interval) and `value` (float64), one row per point in time order.
@@ -232,16 +290,134 @@ python -m src.data.export            # data/processed/series/: one CSV per serie
 change points both as positions (`t_deploy`, `t_change`, `t_stop`) and as timestamps (`deploy_at`,
 `change_at`). Detector alarms on these series are matched to the backtest by `id` and `timestamp`.
 
-## Stream A: Residual Conformal Drift Detection and Evaluation (`src/detector`)
+## Stream A: Seasonality-Aware Drift Detection (`src/detector`)
 
-To solve the alert fatigue problem common in seasonal time series (where traditional batch tests like PSI and Wasserstein trigger massive false alarms due to natural seasonality), Stream A implements a **seasonality-aware dual-layer detector**:
+Classical drift detectors applied to the raw values of a seasonal series take the daily or weekly cycle for a change
+and raise many false alarms. Stream A removes the seasonal profile first and watches what is left.
 
-- **`residual_detector.py`**: Performs STL decomposition to separate trend, seasonality, and residuals. It computes **adaptive conformal intervals** on the residuals to monitor two independent anomaly dimensions:
-  1. *Absolute residual deviation* (detecting sudden level shifts or mean changes).
-  2. *Local Interquartile Range (IQR) dispersion* (detecting volatility and amplitude shifts).
-- **`run_residual_detector_evaluation.py`**: Executes the evaluation runner across the 3-level benchmark suite (Level 1 clean block-bootstrap series for False Alarm Rate, Level 2 semi-synthetic injected drifts across $0.5\sigma$ to $3\sigma$ magnitudes, and Level 3 real-world consensus datasets).
-- **`notebooks/02_residual_conformal_evaluation.ipynb`**: Interactive research notebook containing comparative visualizations, precision-recall breakdowns, and detection delay curves against traditional streaming and batch baselines (ADWIN, KS, PSI, Page-Hinkley, KSWIN, Wasserstein).
+#### The residual conformal detector (`residual_detector.py`)
 
+`ResidualConformalDriftDetector` works in three steps:
+
+1. **Causal decomposition.** The first max(2p, w) points (p the seasonal period, w the calibration window) are
+   decomposed at once with the robust STL of statsmodels. After that the series is processed in blocks of p points,
+   and each block is decomposed on a history of at most max(6p, 3w) points that ends with the block, so a change after
+   a block cannot affect its residuals.
+2. **Conformal threshold.** At every point the previous w residuals form the calibration window. With m their median
+   and q the conformal quantile of their absolute deviations from m at level 1 - alpha (the ceil((1 - alpha)(w + 1))-th
+   smallest deviation), the threshold of a single point is T = c * q, where c is the sensitivity multiplier.
+3. **Three scores.** A point violates the rule if the current residual deviates from m by more than T (abrupt
+   changes), if the mean of the last v residuals deviates from m by more than 1.35 * T / sqrt(v) (gradual changes), or
+   if the interquartile range of the last v residuals is more than 1.8 * c times that of the calibration window
+   (changes of the seasonal amplitude or of the noise). An alarm is raised after `min_consecutive_alerts` violations
+   in a row and is followed by a pause of `cooldown_steps` points.
+
+Settings of the comparison (`RESIDUAL_DETECTOR_CONFIGS["single"]` in `run_residual_detector_evaluation.py`, used by
+the notebooks): alpha = 0.05, w = 150, v = 16, c = 1.6 (1.3 for the Alibaba series), 2 consecutive violations (1 for
+Alibaba) and a pause of 40 points. The `"multi"` settings scale the windows to the period and the length of a series;
+stream B uses them with a daily period (see "How the Two Streams Connect").
+
+#### Baseline detectors (`baseline_detectors.py`)
+
+`BaselineDetectorWrapper` runs six classical detectors on the raw values with the settings of
+`run_baseline_evaluation.py`: the Kolmogorov-Smirnov test (p < 0.01), the population stability index (above 0.1) and
+the Wasserstein distance (above 0.5), each comparing a reference window and a current window of 100 points every 25
+points, and ADWIN (delta = 0.002), the Page-Hinkley test (threshold 50) and KSWIN (alpha = 0.01, window of 100 points,
+fixed seed) from River, updated with every point.
+
+#### The three-level benchmark (`drift_generator.py`, `generate_benchmarks.py`)
+
+- **Level 1, series without changes** (false alarm rate): the STL trend of a series is replaced by its median, the
+  seasonal component is kept, and the remainder is resampled with a block bootstrap in blocks of one period, with a
+  fixed random seed.
+- **Level 2, injected changes** (detection of a change of known type, moment and size): at the middle of a series an
+  abrupt change (a constant of k sigma), a gradual change (a linear ramp that reaches k sigma at the end of the series)
+  or a change of the seasonal amplitude (the seasonal component times k is added) is injected, with k = 0.5, 1, 2 and
+  3 and sigma the standard deviation of the STL remainder.
+- **Level 3, annotated real changes**: series of TCPD with change points marked by human annotators.
+
+Every series also gets its seasonal strength F = max(0, 1 - Var(R) / Var(S + R)) and a group: weak below 0.30,
+moderate below 0.65, strong from 0.65. There are two benchmarks:
+
+- one series per source (`generate_all_benchmarks`, run by `python -m src.detector.generate_benchmarks`): the CPU
+  utilisation of the Alibaba cluster, the UCI client MT_200, the JFK passengers of TCPD and a SeisBench Iquique
+  waveform; manifest `data/processed/benchmark_manifest.json` (notebooks `stream_a_01` and `stream_a_02`);
+- the multi-series benchmark of the comparison (`generate_multi_series_benchmarks`, notebook `stream_a_03`): two
+  Alibaba series, five UCI clients of 2013 and three TCPD series (JFK passengers, Iceland tourism, US population). They
+  give 10 series without changes, 84 series with injected changes (7 series x 3 types x 4 magnitudes) and 3 annotated
+  series; manifest `data/processed/multi_series_benchmark_manifest.json`.
+
+#### Scoring and statistical tests (`scoring.py`, `statistical_tests.py`)
+
+All detectors are scored by one function, `score_alerts_for_series`. On level 1 every alarm is false, and the false
+alarm rate is the number of alarms per 1000 points. On levels 2 and 3 an alarm within 50 points after a change point
+that is not matched yet is a true positive, each change point is matched once, every other alarm is a false positive
+and an unmatched change point is a false negative; precision, recall and the F1 score follow, and the delay is
+measured to the matched alarm. `evaluate_detectors_statistically` runs the Friedman test on the ranks of the
+detectors and, if it rejects equal performance at the 5% level, the Nemenyi post-hoc test (scikit-posthocs). The
+blocks are the 10 series for the false alarm rate, the 24 combinations of source, change type and magnitude for the F1
+score and the delay on level 2 (for the delay only those in which every detector found the change) and the 3 series of
+level 3.
+
+#### Notebooks and stored results
+
+- `stream_a_01_eda_and_baselines`: the data, the STL decomposition, the single-series benchmark and the baselines;
+- `stream_a_02_residual_conformal_evaluation`: the detector on the single-series benchmark, compared with the baselines;
+- `stream_a_03_multi_series_residual_vs_baseline`: the multi-series benchmark, all seven detectors, the results by
+  level and by seasonal strength;
+- `stream_a_04_statistical_testing_detector`: the Friedman and Nemenyi tests.
+
+The results of the comparison are kept in git: `data/processed/multi_series_detector_comparison_results.csv`, one row
+per detector and benchmark series (source, series, seasonal strength and group, level, change type, magnitude, false
+alarms, false alarm rate, precision, recall, F1 score, delay), and the manifest of the multi-series benchmark.
+`stream_a_04` runs from this file on a clean clone; the other three notebooks build the benchmark from the raw data
+(datasets 1 to 4).
+
+#### Run:
+```bash
+python -m src.detector.generate_benchmarks      # single-series benchmark: data/processed/benchmark_manifest.json + series
+python -m src.detector.run_baseline_evaluation  # the baselines on it: data/processed/baseline_evaluation_results.csv
+# then the notebooks: stream_a_02 (the detector on this benchmark), stream_a_03 (the multi-series benchmark and all
+# detectors, writes multi_series_detector_comparison_results.csv) and stream_a_04 (the tests on that file)
+```
+
+## How the Two Streams Connect
+
+- **Data.** Both streams use the loaders and the standard frame of `src/data`. `python -m src.data.export` writes the
+  263 series of stream B as standard frames with a manifest, so the detector of stream A runs on them unchanged.
+- **Alarms.** `src/recommendations/alarms.py` wraps `ResidualConformalDriftDetector` with the `"multi"` settings for a
+  daily period. In the backtest it runs on the whole series, and every alarm is dated at the end of its STL block, the
+  first hour at which it is known; in the monitoring service `ResidualStream` feeds it one value at a time and gives
+  the same alarms. ADWIN runs next to it as the reference detector. Both are calibrated per source to one false alarm
+  per 14 days on a control period without changes, and their alarms are stored in `data/alerts/alerts.csv` with the
+  settings in `data/alerts/detectors.csv` (details in the section on stream B below).
+- **Decisions on alarms.** The strategies `alarm_*` of stream B review the forecasting model at the first origin after
+  an alarm instead of on a weekly calendar. `notebooks/common_link_alarms_to_backtest.ipynb` compares the two
+  detectors as triggers, and `notebooks/demo_one_series.ipynb` shows the whole chain on one series.
+
+## Main Results
+
+Stream A (`multi_series_detector_comparison_results.csv`, notebooks `stream_a_03` and `stream_a_04`):
+
+- On the series without changes the detector raises 6.01 false alarms per 1000 points, 78% to 80% fewer than the
+  population stability index, the Wasserstein distance and the Page-Hinkley test (28 to 30), but more than ADWIN (1.04)
+  and KSWIN (3.80).
+- On the 84 injected changes it has the best F1 score (average rank 1.35 of 7) and is significantly better than five of
+  the six classical detectors (Nemenyi test, p < 0.05; against KSWIN p = 0.074); it finds 64% of the changes and 86%
+  of the changes of the seasonal amplitude.
+- On the 3 annotated real series its F1 score is 0.69 against at most 0.25 for the classical detectors; with three
+  series the Friedman test finds no significant difference (p = 0.18).
+
+Stream B (`data/processed/stream_b/runs.csv`, notebooks `stream_b_01` to `stream_b_03`, `llm_report.py`):
+
+- The acceptance rule removes 82% of the retrainings of a weekly schedule (624 instead of 3477 on the 263 series), at a
+  MASE after the change of 0.72 against 0.70 on the national load, and stops harmful advice: the rule-based advisor is
+  worse than doing nothing on 11% of the series with the check and on 42% without it.
+- None of the 42 tested configurations of the language model advisor (7 models of 5 vendors, the four prompt variants
+  with diagnostics, weekly and on alarm) differs significantly from leaving the model unchanged on the 23 real series (smallest p = 0.063), while
+  weekly retraining, the checked schedule and the checked catalog are significantly better than it (paired Wilcoxon
+  tests with the Holm correction).
+- On the demo series the system lowers the error after the change by 45% (MASE 1.89 against 3.44).
 
 ## Stream B: Adaptation Strategies and Backtest (`src/recommendations`)
 
@@ -284,13 +460,12 @@ with the catalog and the diagnostics), `instructions` (plus how to read the diag
 diagnostics) and `rich` (the diagnostics of `base` plus the error and bias of each of the last 14 days, the last 48
 hours of values against the forecast, and the previous decision with the error before and after it). Every LLM
 answer is stored locally in `data/llm_answers/`. The answers of the reported runs (about 43,000) and of the prompt
-probe are published as a separate archive, [llm_answers.zip](https://drive.google.com/file/d/16I7OORFDomTBxDHQkju91yIA2cb15p2d/view?usp=sharing) (5.5 MB,
-SHA-256 `fd9330eb10e1b68406d8bd45285fee875185e3b6cca2537c61148077803f56c3`), to keep the repository small: `unzip llm_answers.zip` in
-the root of the repository creates `data/llm_answers` and `data/llm_probe`, and a rerun then reads the stored answers
-and needs no API key. The model string names the provider
-first (`openrouter/...`, `anthropic/...`, `ollama/...`);
-the key is read from `~/.config/diploma/<provider>.env`, one line `<PROVIDER>_API_KEY=...` (another folder can be
-set in `LLM_KEY_DIR`).
+probe are published as a separate archive, [llm_answers.zip](https://drive.google.com/file/d/16I7OORFDomTBxDHQkju91yIA2cb15p2d/view?usp=sharing)
+(5.5 MB, SHA-256 `fd9330eb10e1b68406d8bd45285fee875185e3b6cca2537c61148077803f56c3`), to keep the repository small:
+`unzip llm_answers.zip` in the root of the repository creates `data/llm_answers` and `data/llm_probe`, and a rerun
+then reads the stored answers and needs no API key. The model string names the provider first (`openrouter/...`,
+`anthropic/...`, `ollama/...`); the key is read from `~/.config/diploma/<provider>.env`, one line
+`<PROVIDER>_API_KEY=...` (another folder can be set in `LLM_KEY_DIR`).
 
 Decisions on detector alarms (`alarms.py`, the link with stream A): the strategies `alarm_retrain`, `alarm_gate`,
 `alarm_catalog_gate`, `alarm_oracle`, `alarm_rules`, `alarm_rules_gate`, `alarm_llm` and `alarm_llm_gate` take the
@@ -341,8 +516,9 @@ python -m pytest tests                                       # tests
 ```
 
 Results are written to `data/processed/stream_b/` (`runs.csv`, `summary.csv`, `oracle_picks.csv`, `tune.csv`,
-`example_*.csv`); tables and figures are in `notebooks/02_stream_b_baselines.ipynb`. The published results were
-computed with Python 3.12, numpy 2.2.6, pandas 2.3.3, statsmodels 0.15.0 and lightgbm 4.7.0.
+`example_*.csv`); tables and figures are in the notebooks `stream_b_01` to `stream_b_03` and
+`common_link_alarms_to_backtest`. The published results were computed with Python 3.12, numpy 2.2.6, pandas 2.3.3,
+statsmodels 0.15.0 and lightgbm 4.7.0.
 
 #### Stored results
 
@@ -366,7 +542,7 @@ Holm correction check the comparisons behind the claims (the checked schedule ag
 and without the check and against doing nothing, retraining on alarm against the calendar, the best checked action
 against the weekly oracle). The groups are the national load, the seismic noise, both together, and each synthetic
 scenario; the ranking contains the 17 deployable strategies, the oracles and the seasonal naive forecast are
-references. `notebooks/05_stream_b_statistical_tests.ipynb` reads `runs.csv` and shows the tables and the critical
+references. `notebooks/stream_b_03_statistical_tests.ipynb` reads `runs.csv` and shows the tables and the critical
 difference diagrams.
 
 ## Monitoring Service (`src/api`, `src/monitoring`, Docker)
@@ -454,9 +630,21 @@ Not yet in the service: the LLM advisor inside the Docker image (the image has n
 as `residual_conformal` (`ResidualStream` in `alarms.py` feeds it one value at a time; an alarm arrives at the end of
 its STL block, up to 23 hours after the hour that raised it).
 
+## Reproducing the Results
 
-## License
+| What | Command or notebook | Needs |
+|------|---------------------|-------|
+| Tests | `python -m pytest tests` | nothing (2 tests skip without the exported series and the stored LLM answers) |
+| Demo on one series | `notebooks/demo_one_series.ipynb`; `docker compose up --build -d` and `python -m src.recommendations.demo session` | Docker for the service part |
+| Stream A: statistical tests | `notebooks/stream_a_04_statistical_testing_detector.ipynb` | nothing (stored results) |
+| Stream A: benchmarks and detectors | `python -m src.detector.generate_benchmarks`, `python -m src.detector.run_baseline_evaluation`, notebooks `stream_a_01` to `stream_a_03` | datasets 1 to 4 |
+| Stream B: tables and figures | notebooks `stream_b_01` and `stream_b_03` (in full), `stream_b_02` and `common_link_alarms_to_backtest` (except the Milan example), `python -m src.recommendations.llm_report` | nothing (stored results); the answers archive for the shares of the actions |
+| Stream B: experiments | `python -m src.recommendations.run_backtest` with the options above, `python -m src.recommendations.alarms` | datasets 1, 5 and 6; about an hour on 16 cores |
+| Stream B and the service in one command | `bash run_pipeline.sh` | Python 3.12, Docker, curl, unzip |
 
-The code of this repository is released under the MIT License (see `LICENSE`). The datasets are not part of the
-repository and keep the licences of their sources, listed in "Data Source & Setup"; the series of the demo in
-`data/demo` is derived from the UCI ElectricityLoadDiagrams20112014 dataset (CC BY 4.0).
+## Authors and License
+
+Yelyzaveta Pereriadkina (stream A) and Oleg Zadorozhnyi (stream B). The code of this repository is released under the
+MIT License (see `LICENSE`). The datasets are not part of the repository and keep the licences of their sources,
+listed in "Data Sources and Setup"; the series of the demo in `data/demo` is derived from the UCI
+ElectricityLoadDiagrams20112014 dataset (CC BY 4.0).
