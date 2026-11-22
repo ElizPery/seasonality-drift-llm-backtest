@@ -3,10 +3,10 @@
 ```text
     seasonality-drift-llm-mlops/
     │
-    ├── .github/workflows/          # CI/CD pipelines (GitHub Actions for pytest)
     ├── data/                       # Directory for datasets
     │   ├── raw/                    # Raw data (Alibaba, UCI Electricity, TCPDBench, SeisBench)
-    │   ├── processed/              # Processed and synthetically labeled series
+    │   ├── processed/              # Processed and synthetically labeled series; stream_b/ holds the results of stream B
+    │   ├── llm_answers/            # Stored answers of the LLM advisors, unpacked from the archive (not in git)
     │   └── demo/                   # The series of the demo notebook and the stored LLM answers on it
     │
     ├── notebooks/                  # Research Jupyter Notebooks for experiments
@@ -38,6 +38,10 @@
     │   │   ├── data_sources.py     # ENTSO-E and seismic noise series with features and labels (loaders in src/data)
     │   │   ├── plots.py            # Figures for the stream B notebook
     │   │   ├── run_backtest.py     # Stream B runner
+    │   │   ├── stats_tests.py      # Rank tests over the series (Friedman, Nemenyi, Wilcoxon with Holm)
+    │   │   ├── strata.py           # Groups of series by seasonal strength
+    │   │   ├── llm_report.py       # LLM advisors on the real series: paired tests, action shares, figure
+    │   │   ├── prompt_probe.py     # Probe of the prompt wording
     │   │   ├── llm_client.py       # Instructor + Pydantic v2 schemas for LLM
     │   │   ├── alarms.py           # detector alarms: stream A detector and ADWIN (batch and online), alerts file
     │   │   ├── monitor.py          # Monitor: the decision loop as the data arrive (engine of the service)
@@ -48,6 +52,7 @@
     │   │   ├── main.py             # FastAPI application (sessions, /detect, /recommendations, /metrics)
     │   │   ├── sessions.py         # sessions playing a series in the background
     │   │   ├── store.py            # history of the sessions in PostgreSQL (for Grafana)
+    │   │   ├── uploads.py          # upload of your own series
     │   │   └── schemas.py          # Pydantic schemas for API requests/responses
     │   │
     │   └── monitoring/             # Infrastructure integration
@@ -55,16 +60,28 @@
     │       └── metrics.py          # Prometheus metrics (prometheus_client)
     │
     ├── tests/                      # Automated tests (Pytest)
-    │   ├── test_detector.py
-    │   └── test_backtester.py
+    │   └── test_*.py               # data, alarms, backtester, LLM client, monitor, API, demo, statistical tests
     │
+    ├── docs/images/                # Figures of the README
     ├── deploy/                     # Prometheus configuration, Grafana data sources and dashboards
     ├── docker-compose.yml          # Local deployment (FastAPI, PostgreSQL, Prometheus, Grafana)
     ├── Dockerfile                  # FastAPI service containerization
     ├── requirements-service.txt    # Dependencies of the service image
     ├── requirements.txt            # Python 3.11+ dependencies
+    ├── LICENSE                     # MIT License
     └── README.md                   # Project description and setup instructions
 ```
+
+
+## Architecture
+
+![Components and data flow](docs/images/architecture.png)
+
+The loaders of `src/data` turn every source into the standard frame (`timestamp`, `value`). The decision loop of
+`src/recommendations` is the same code in both uses: the backtest replays it over the 263 series of the experiments
+and writes the results to CSV, and the monitoring service plays one series hour by hour and shows the same decisions
+in Grafana. The LLM advisor is reached through a gateway (OpenRouter); every answer is stored, so a rerun reads the
+stored answers.
 
 
 ## Demo on One Series
@@ -263,10 +280,15 @@ and answers with one catalog action and a short reason (Pydantic schema, validat
 Strategies `llm` (applied as proposed) and `llm_gate` (applied only if the acceptance rule confirms it); `rules` and
 `rules_gate` use fixed rules on the same diagnostics. Five prompt variants (`--prompt`): `base` (the system prompt
 with the catalog and the diagnostics), `instructions` (plus how to read the diagnostics and when each action fits),
-`examples` (plus four worked decisions from a synthetic series that is not evaluated) and `bare` (ablation: no
-diagnostics). Every LLM answer is stored locally in `data/llm_answers/` (not in git; the answers of the reported
-runs are kept as a separate archive), so a rerun with that folder in place reads the stored answers and needs no API
-key. The model string names the provider first (`openrouter/...`, `anthropic/...`, `ollama/...`);
+`examples` (plus four worked decisions from a synthetic series that is not evaluated), `bare` (ablation: no
+diagnostics) and `rich` (the diagnostics of `base` plus the error and bias of each of the last 14 days, the last 48
+hours of values against the forecast, and the previous decision with the error before and after it). Every LLM
+answer is stored locally in `data/llm_answers/`. The answers of the reported runs (about 43,000) and of the prompt
+probe are published as a separate archive, [llm_answers.zip](https://drive.google.com/file/d/16I7OORFDomTBxDHQkju91yIA2cb15p2d/view?usp=sharing) (5.5 MB,
+SHA-256 `fd9330eb10e1b68406d8bd45285fee875185e3b6cca2537c61148077803f56c3`), to keep the repository small: `unzip llm_answers.zip` in
+the root of the repository creates `data/llm_answers` and `data/llm_probe`, and a rerun then reads the stored answers
+and needs no API key. The model string names the provider
+first (`openrouter/...`, `anthropic/...`, `ollama/...`);
 the key is read from `~/.config/diploma/<provider>.env`, one line `<PROVIDER>_API_KEY=...` (another folder can be
 set in `LLM_KEY_DIR`).
 
@@ -321,6 +343,18 @@ python -m pytest tests                                       # tests
 Results are written to `data/processed/stream_b/` (`runs.csv`, `summary.csv`, `oracle_picks.csv`, `tune.csv`,
 `example_*.csv`); tables and figures are in `notebooks/02_stream_b_baselines.ipynb`. The published results were
 computed with Python 3.12, numpy 2.2.6, pandas 2.3.3, statsmodels 0.15.0 and lightgbm 4.7.0.
+
+#### Stored results
+
+The results of the reported runs are kept in git in `data/processed/stream_b/`: `runs.csv` (one row per series,
+strategy and repeat), `summary.csv`, `strata.csv`, `oracle_picks.csv`, `tune.csv`, `recalibrate_weekly.csv` (the
+weekly level recalibration on the 263 series, an input of `llm_report.py` that needs the raw data to recompute) and
+the three series of the examples (`example_*.csv`). On a clean clone without the raw data, `llm_report.py` and the
+notebooks `stream_b_01_baselines` and `stream_b_03_statistical_tests` run in full; `stream_b_02_acceptance_rule`
+and `common_link_alarms_to_backtest` run except their example on the seismic series of Milan, which loads the raw
+data (dataset 6 above). The tables of `llm_report.py` (`llm_paired_tests.csv`, `llm_synthetic_tests.csv`,
+`llm_action_shares.csv`) are not stored: the command writes them in a few seconds, the shares of the actions from
+the unpacked answers.
 
 #### Statistical comparison of the strategies
 
@@ -419,3 +453,10 @@ Not yet in the service: the LLM advisor inside the Docker image (the image has n
 `llm` strategies work with `llm_model`) and the model registry in MLflow. The detector of stream A runs in the service
 as `residual_conformal` (`ResidualStream` in `alarms.py` feeds it one value at a time; an alarm arrives at the end of
 its STL block, up to 23 hours after the hour that raised it).
+
+
+## License
+
+The code of this repository is released under the MIT License (see `LICENSE`). The datasets are not part of the
+repository and keep the licences of their sources, listed in "Data Source & Setup"; the series of the demo in
+`data/demo` is derived from the UCI ElectricityLoadDiagrams20112014 dataset (CC BY 4.0).

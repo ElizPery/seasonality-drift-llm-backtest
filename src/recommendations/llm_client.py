@@ -4,11 +4,12 @@ advisors that turn a decision point into one action of the catalog.
 At a decision origin T the advisor sees a short description of the series computed from data before T
 only: how the error of the deployed model changed week by week, its bias, how the level, the daily
 profile and the noise moved, and how long ago the model was last changed. It answers with one action
-name from the catalog and a short reason. Four prompt variants (`PROMPTS`) differ in what the advisor is
+name from the catalog and a short reason. Five prompt variants (`PROMPTS`) differ in what the advisor is
 told: the system prompt alone ("base"), with instructions on how to read the diagnostics ("instructions"),
-with the instructions and worked examples ("examples"), or no diagnostics at all ("bare", the ablation). The answer schema is a Pydantic model; Instructor validates
-the reply and asks again if it does not fit (JSON mode: newer Claude models reject a forced tool call,
-which the default tools mode of Instructor sends).
+with the instructions and worked examples ("examples"), no diagnostics at all ("bare", the ablation), or
+the diagnostics of "base" with the daily errors, the last hours and the previous decision ("rich"). The
+answer schema is a Pydantic model; Instructor validates the reply and asks again if it does not fit (JSON
+mode: newer Claude models reject a forced tool call, which the default tools mode of Instructor sends).
 
 Every LLM answer is stored in a JSON lines cache keyed by the model, the prompt and the repeat number, so
 a rerun of the experiments reads the stored answers and needs no API key. The model string names the
