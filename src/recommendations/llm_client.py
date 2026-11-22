@@ -72,7 +72,9 @@ def diagnostics(y: np.ndarray, pred: np.ndarray, T: int, t_deploy: int, scale: f
     def noise(rows):  # change against the same hour of the previous day
         return float(np.std(y[rows] - y[rows - DAY]))
 
-    weeks = [mase(np.arange(o, o + WEEK)) for o in range(max(t_deploy, T - 3 * WEEK), T, WEEK)]
+    # the whole weeks that end at T, at most three and none before deployment: an alarm review can fall on any day
+    # (from two weeks after deployment on), and a week counted from the deployment could reach past T
+    weeks = [mase(np.arange(o, o + WEEK)) for o in range(T - 3 * WEEK, T, WEEK) if o >= t_deploy]
     return dict(
         mase_first_weeks=round(mase(first), 2),
         mase_last_weeks=[round(w, 2) for w in weeks],

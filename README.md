@@ -21,7 +21,7 @@ git clone https://github.com/ElizPery/seasonality-drift-llm-backtest.git
 cd seasonality-drift-llm-backtest
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python -m pytest tests     # without any data: 68 pass, 2 skip (they need the exported series and the stored LLM answers)
+python -m pytest tests     # without any data: 69 pass, 2 skip (they need the exported series and the stored LLM answers)
 ```
 
 Without any data download you can then run the demo on one series (below) and, from the stored results, the notebook
@@ -465,7 +465,7 @@ diagnostics) and `rich` (the diagnostics of `base` plus the error and bias of ea
 hours of values against the forecast, and the previous decision with the error before and after it). Every LLM
 answer is stored locally in `data/llm_answers/`. The answers of the reported runs (about 43,000) and of the prompt
 probe are published as a separate archive, [llm_answers.zip](https://drive.google.com/file/d/16I7OORFDomTBxDHQkju91yIA2cb15p2d/view?usp=sharing)
-(5.5 MB, SHA-256 `fd9330eb10e1b68406d8bd45285fee875185e3b6cca2537c61148077803f56c3`), to keep the repository small:
+(5.5 MB, SHA-256 `9ffc772aaba6cad61f8ec214440526b40addf94e0dc0fd4bd40f0fb7c8528c5b`), to keep the repository small:
 `unzip llm_answers.zip` in the root of the repository creates `data/llm_answers` and `data/llm_probe`, and a rerun
 then reads the stored answers and needs no API key. The model string names the provider first (`openrouter/...`,
 `anthropic/...`, `ollama/...`); the key is read from `~/.config/diploma/<provider>.env`, one line
@@ -619,7 +619,7 @@ and both forecasts, the error over the last 7 days, the alarms and reviews as ma
 gain and its interval. **Drift service** shows the live service metrics: requests and latency, sessions, hours read
 per second, reviews by outcome, time of a review, model fits for actions and for checks, CPU and memory.
 
-![Drift monitor: the seismic noise of Milan in 2020 played with alarm_rules_gate (screenshot taken with the conformal stand-in detector used before the stream A detector was connected)](docs/images/grafana_drift_monitor_milan.png)
+![Drift monitor: the seismic noise of Milan in 2020 played with alarm_rules_gate on the alarms of the stream A detector: the alarm at 23:00 on 29 March and the review at 00:00 on 30 March, where the check accepts a level recalibration](docs/images/grafana_drift_monitor_milan.png)
 
 ![Drift service: live metrics of the service while two sessions play](docs/images/grafana_drift_service.png)
 
