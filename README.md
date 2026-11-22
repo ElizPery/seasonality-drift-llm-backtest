@@ -346,13 +346,15 @@ computed with Python 3.12, numpy 2.2.6, pandas 2.3.3, statsmodels 0.15.0 and lig
 
 #### Stored results
 
-The results of the reported runs are kept in git in `data/processed/stream_b/`, so the notebooks of stream B,
-`stats_tests.py` and `llm_report.py` work on a clean clone without a rerun: `runs.csv` (one row per series, strategy
-and repeat), `summary.csv`, `strata.csv`, `oracle_picks.csv`, `tune.csv`, `recalibrate_weekly.csv` (the weekly level
-recalibration on the real series, an input of `llm_report.py` that needs the raw data to recompute) and the three
-series of the examples (`example_*.csv`). The tables of `llm_report.py` (`llm_paired_tests.csv`,
-`llm_synthetic_tests.csv`, `llm_action_shares.csv`) are not stored: the command writes them in a few seconds, the
-shares of the actions from the unpacked answers.
+The results of the reported runs are kept in git in `data/processed/stream_b/`: `runs.csv` (one row per series,
+strategy and repeat), `summary.csv`, `strata.csv`, `oracle_picks.csv`, `tune.csv`, `recalibrate_weekly.csv` (the
+weekly level recalibration on the 263 series, an input of `llm_report.py` that needs the raw data to recompute) and
+the three series of the examples (`example_*.csv`). On a clean clone without the raw data, `llm_report.py` and the
+notebooks `stream_b_01_baselines` and `stream_b_03_statistical_tests` run in full; `stream_b_02_acceptance_rule`
+and `common_link_alarms_to_backtest` run except their example on the seismic series of Milan, which loads the raw
+data (dataset 6 above). The tables of `llm_report.py` (`llm_paired_tests.csv`, `llm_synthetic_tests.csv`,
+`llm_action_shares.csv`) are not stored: the command writes them in a few seconds, the shares of the actions from
+the unpacked answers.
 
 #### Statistical comparison of the strategies
 
