@@ -14,6 +14,7 @@ data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/processed/stream_b/
+data/processed/stream_b/llm_*.csv
 
 # Jupyter Notebook Checkpoints
 .ipynb_checkpoints/
@@ -29,6 +30,7 @@ mlruns/
 logs/
 *.log
 
-# Stored LLM answers: the folders are unpacked from data/llm_answers.zip, which is kept in git
+# Stored LLM answers: unpacked from the archive linked in the README, not kept in git
 data/llm_answers/
 data/llm_probe/
+llm_answers.zip

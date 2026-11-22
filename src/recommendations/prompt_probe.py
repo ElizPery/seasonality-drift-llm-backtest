@@ -10,7 +10,7 @@ backtest checks the proposal before it is applied. Half of the sample are review
 week is at least 1.2 times the error of the first weeks. The table compares, per model, the actions chosen with
 the base system message and with the clarified one on the same diagnostics.
 
-The answers of the probe are stored in data/llm_probe (unpacked from data/llm_answers.zip), apart from
+The answers of the probe are stored in data/llm_probe (not in git, kept in the archive of the answers), apart from
 the cache of the experiments, so with that folder in place the table is reproduced without an API key. The probe is a check of the wording, not an experiment of the
 backtest: its answers do not enter runs.csv.
 """

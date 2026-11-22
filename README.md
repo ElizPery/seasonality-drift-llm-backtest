@@ -6,7 +6,7 @@
     ├── data/                       # Directory for datasets
     │   ├── raw/                    # Raw data (Alibaba, UCI Electricity, TCPDBench, SeisBench)
     │   ├── processed/              # Processed and synthetically labeled series; stream_b/ holds the results of stream B
-    │   ├── llm_answers.zip         # Stored answers of the LLM advisors (unpack to rerun without an API key)
+    │   ├── llm_answers/            # Stored answers of the LLM advisors, unpacked from the archive (not in git)
     │   └── demo/                   # The series of the demo notebook and the stored LLM answers on it
     │
     ├── notebooks/                  # Research Jupyter Notebooks for experiments
@@ -284,8 +284,10 @@ with the catalog and the diagnostics), `instructions` (plus how to read the diag
 diagnostics) and `rich` (the diagnostics of `base` plus the error and bias of each of the last 14 days, the last 48
 hours of values against the forecast, and the previous decision with the error before and after it). Every LLM
 answer is stored locally in `data/llm_answers/`. The answers of the reported runs (about 43,000) and of the prompt
-probe are kept in git as `data/llm_answers.zip`: `unzip data/llm_answers.zip` in the root of the repository puts
-them in place, and a rerun then reads the stored answers and needs no API key. The model string names the provider
+probe are published as a separate archive, [llm_answers.zip](https://drive.google.com/file/d/16I7OORFDomTBxDHQkju91yIA2cb15p2d/view?usp=sharing) (5.5 MB,
+SHA-256 `fd9330eb10e1b68406d8bd45285fee875185e3b6cca2537c61148077803f56c3`), to keep the repository small: `unzip llm_answers.zip` in
+the root of the repository creates `data/llm_answers` and `data/llm_probe`, and a rerun then reads the stored answers
+and needs no API key. The model string names the provider
 first (`openrouter/...`, `anthropic/...`, `ollama/...`);
 the key is read from `~/.config/diploma/<provider>.env`, one line `<PROVIDER>_API_KEY=...` (another folder can be
 set in `LLM_KEY_DIR`).
@@ -344,11 +346,13 @@ computed with Python 3.12, numpy 2.2.6, pandas 2.3.3, statsmodels 0.15.0 and lig
 
 #### Stored results
 
-The results of the reported runs are kept in git in `data/processed/stream_b/`, so the notebooks of stream B and
-`stats_tests.py` work on a clean clone without a rerun: `runs.csv` (one row per series, strategy and repeat),
-`summary.csv`, `strata.csv`, `oracle_picks.csv`, `tune.csv`, `recalibrate_weekly.csv`, the tables of `llm_report.py`
-(`llm_paired_tests.csv`, `llm_synthetic_tests.csv`, `llm_action_shares.csv`) and the three series of the examples
-(`example_*.csv`).
+The results of the reported runs are kept in git in `data/processed/stream_b/`, so the notebooks of stream B,
+`stats_tests.py` and `llm_report.py` work on a clean clone without a rerun: `runs.csv` (one row per series, strategy
+and repeat), `summary.csv`, `strata.csv`, `oracle_picks.csv`, `tune.csv`, `recalibrate_weekly.csv` (the weekly level
+recalibration on the real series, an input of `llm_report.py` that needs the raw data to recompute) and the three
+series of the examples (`example_*.csv`). The tables of `llm_report.py` (`llm_paired_tests.csv`,
+`llm_synthetic_tests.csv`, `llm_action_shares.csv`) are not stored: the command writes them in a few seconds, the
+shares of the actions from the unpacked answers.
 
 #### Statistical comparison of the strategies
 
