@@ -141,7 +141,8 @@ def paired_tests(table: pd.DataFrame) -> pd.DataFrame:
     """Every advisor configuration against doing nothing, and each family against the fixed strategies it can be
     replaced by: the weekly schedule and the weekly recalibration for advice applied as proposed, the checked
     schedule (a fixed advisor that always proposes retraining on all history) and the checked catalog for checked
-    advice. The Holm correction runs over the configurations of one comparison."""
+    advice, and on alarm retraining on all history at the same alarms, without and with the check. The Holm
+    correction runs over the configurations of one comparison."""
     f = families(table)
     plan = [("every configuration against doing nothing", f["applied"] + f["checked"] + f["on alarm"], "nothing"),
             ("applied against the weekly schedule", f["applied"], "scheduled"),
@@ -149,7 +150,13 @@ def paired_tests(table: pd.DataFrame) -> pd.DataFrame:
             ("checked against the checked schedule", f["checked"], "scheduled_gate"),
             ("checked against the checked catalog", f["checked"], "catalog_gate")]
     out = [wilcoxon_pairs(table, [(c, b) for c in cols]).assign(comparison=name) for name, cols, b in plan if b in table]
-    refs = [(a, b) for a, b in [("scheduled", "nothing"), ("scheduled_gate", "nothing"), ("catalog_gate", "nothing"),
+    # on alarm the fixed counterpart retrains on all history at the same alarms, as proposed or checked
+    fixed = {"alarm_llm": "alarm_retrain", "alarm_llm_gate": "alarm_gate"}
+    pairs = [(c, f"{fixed[c.split('|')[0]]} {c[c.rfind('['):]}") for c in f["on alarm"]]
+    pairs = [(a, b) for a, b in pairs if b in table]
+    if pairs:
+        out.append(wilcoxon_pairs(table, pairs).assign(comparison="on alarm against retraining on the same alarms"))
+    refs =[(a, b) for a, b in [("scheduled", "nothing"), ("scheduled_gate", "nothing"), ("catalog_gate", "nothing"),
                                 (RECALIBRATE, "nothing"), ("catalog_gate", "scheduled_gate")] if a in table and b in table]
     out.append(wilcoxon_pairs(table, refs).assign(comparison="strategies without a language model"))
     return pd.concat(out, ignore_index=True)[["comparison", "a", "b", "n", "mean_a", "mean_b", "median_diff", "wins", "ties",
