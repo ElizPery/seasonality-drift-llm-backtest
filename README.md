@@ -38,12 +38,12 @@ Both streams read their data through `src/data`, which turns every source into t
 `value`). Stream A builds a benchmark from these series, runs its residual conformal detector and six classical
 detectors on it, scores all of them with one function and tests the differences; its result is one table with a row
 per detector and benchmark series. Stream B keeps a day-ahead forecasting model for each of its 263 series and reviews
-it on a weekly calendar or on the alarms of a detector: the detector of stream A, fed one value at a time, or ADWIN as
-the reference. At a review an advisor proposes an action from the catalog and the acceptance rule replays it on the
-last two weeks. The decision loop is the same code in both uses: the backtest replays it over the history of every
-series and writes the results to CSV, and the monitoring service plays one series hour by hour and shows the same
-decisions in Grafana. The language model advisor is reached through a gateway (OpenRouter); every answer is stored,
-so a rerun reads the stored answers.
+it on a weekly calendar or on the alarms of a detector: the detector of stream A, or ADWIN as the reference. At a
+review an advisor proposes an action from the catalog, and in the checked strategies the acceptance rule replays it on
+the last two weeks. The decision loop is the same code in both uses: the backtest replays it over the history of every
+series and writes the results to CSV, and the monitoring service plays one series hour by hour, feeds the detector one
+value at a time and shows the same decisions in Grafana. The language model advisor is reached through a gateway
+(OpenRouter); every answer is stored, so a rerun reads the stored answers.
 
 ## Demo on One Series
 
@@ -206,7 +206,7 @@ and cleaned open-access slice provided on Zenodo.
 4. The `load_alibaba_standard_trace()` and `load_alibaba_batch()` methods in `DataLoader` read this aggregated
    CPU, memory and network usage trace.
 
-### 3. Turing Change Point Dataset (TCPD, level 3 of the benchmark)
+### 3. TCPDBench: Turing Change Point Dataset (TCPD, level 3 of the benchmark)
 
 Real time series in which several annotators marked the change points independently (van den Burg and Williams,
 2020). The annotated series serve as level 3 of the benchmark of stream A: JFK passengers, Iceland tourism and US
@@ -216,8 +216,11 @@ population, each scored against one annotator.
 - **Benchmark of change point methods:** [GitHub - alan-turing-institute/TCPDBench](https://github.com/alan-turing-institute/TCPDBench)
 
 #### Setup Instructions:
-1. Save each series as `data/raw/tcpd/<name>.csv` with a column `value` (and optionally `timestamp`).
-2. Save the annotations of the TCPD repository as `data/raw/tcpd/annotations.json`.
+1. Save each series as `data/raw/tcpd/<name>.csv` with a column `value` and optionally `timestamp`. The TCPD
+   repository stores a series as `datasets/<name>/<name>.json`: the `raw` values of its first entry in `series` give
+   `value`, and `time.raw` gives `timestamp`; without timestamps the loader builds a nominal calendar.
+2. Save `annotations.json` of the TCPD repository (the change points of every annotator, by series) as
+   `data/raw/tcpd/annotations.json`.
 3. `load_tcpd_annotated_series()` and `load_tcpd_batch()` in `DataLoader` read a series and the change points of the
    chosen annotator.
 
@@ -336,7 +339,7 @@ fixed seed) from River, updated with every point.
   3 and sigma the standard deviation of the STL remainder.
 - **Level 3, annotated real changes**: series of TCPD with change points marked by human annotators.
 
-Every series also gets its seasonal strength F = max(0, 1 - Var(R) / Var(S + R)) and a group: weak below 0.30,
+Every series also gets its seasonal strength F = max(0, 1 - Var(R) / (Var(S) + Var(R))) and a group: weak below 0.30,
 moderate below 0.65, strong from 0.65. There are two benchmarks:
 
 - one series per source (`generate_all_benchmarks`, run by `python -m src.detector.generate_benchmarks`): the CPU
@@ -368,10 +371,11 @@ level 3.
 - `stream_a_04_statistical_testing_detector`: the Friedman and Nemenyi tests.
 
 The results of the comparison are kept in git: `data/processed/multi_series_detector_comparison_results.csv`, one row
-per detector and benchmark series (source, series, seasonal strength and group, level, change type, magnitude, false
-alarms, false alarm rate, precision, recall, F1 score, delay), and the manifest of the multi-series benchmark.
-`stream_a_04` runs from this file on a clean clone; the other three notebooks build the benchmark from the raw data
-(datasets 1 to 4).
+per detector and benchmark series (source, series, seasonal strength and group, level, change type, magnitude,
+detector, false alarms, false alarm rate, precision, recall, F1 score, delay, detected), and the manifest of the
+multi-series benchmark.
+`stream_a_04` runs from this file on a clean clone; the other three notebooks need the benchmark, which is built from
+the raw data (datasets 1 to 4).
 
 #### Run:
 ```bash
