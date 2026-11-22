@@ -47,6 +47,19 @@ def test_diagnostics_use_data_before_the_decision_only():
     assert len(ctx["mase_last_weeks"]) == 3 and ctx["bias_last_week"] == -0.6
 
 
+def test_diagnostics_of_a_review_between_whole_weeks_do_not_reach_past_it():
+    # an alarm review 16 days after deployment: the weekly errors are the two whole weeks before it
+    y, _ = toy(shift=15)
+    T = T_DEPLOY + 16 * DAY
+    pred = y + 3.0
+    pred[T:] = np.nan  # in the backtest there are no forecasts after the decision yet
+    ctx = diagnostics(y, pred, T, T_DEPLOY, 5.0, T_DEPLOY)
+    y2 = y.copy()
+    y2[T:] += 1000.0
+    assert diagnostics(y2, pred, T, T_DEPLOY, 5.0, T_DEPLOY) == ctx
+    assert len(ctx["mase_last_weeks"]) == 2 and not np.isnan(ctx["mase_last_weeks"]).any()
+
+
 def test_prompt_lists_the_catalog_and_the_bare_prompt_has_no_numbers():
     y, _ = toy()
     ctx = diagnostics(y, y + 1.0, T_DEPLOY + 3 * WEEK, T_DEPLOY, 5.0, T_DEPLOY)
