@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics import precision_recall_fscore_support
 from src.detector.baseline_detectors import BaselineDetectorWrapper
-from src.detector.scoring import score_alerts_for_series
+from src.detector.scoring import score_alerts_for_series, tcpd_f1
 
 
 def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "benchmark_manifest.json", output_file: str = "baseline_evaluation_results.csv"):
@@ -68,7 +68,7 @@ def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "ben
                 gt_cps = None
                 drift_type = "none"
                 magnitude = 0.0
-            elif level == 2:
+            elif level in (0, 2):  # level 0: the series of level 2 without the change, the same position
                 gt_cps = item.get("change_point_idx")
                 drift_type = item["drift_type"]
                 magnitude = item["magnitude_sigma"]
@@ -81,11 +81,14 @@ def run_all_baseline_detectors(data_dir: str = "data", manifest_file: str = "ben
 
             metrics = score_alerts_for_series(
                 detected_indices=alert_indices,
-                level=level,
+                level=2 if level == 0 else level,
                 n_samples=n,
                 ground_truth_cps=gt_cps,
                 tolerance_window=50,
             )
+
+            if item.get("annotations_all"):
+                metrics["f1_tcpd"] = tcpd_f1(alert_indices, item["annotations_all"])
 
             results.append({
                 "dataset": dataset_name,

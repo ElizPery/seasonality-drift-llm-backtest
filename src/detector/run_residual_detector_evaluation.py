@@ -3,7 +3,7 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional
 from src.detector.residual_detector import ResidualConformalDriftDetector
-from src.detector.scoring import score_alerts_for_series
+from src.detector.scoring import score_alerts_for_series, tcpd_f1
 
 # Separate parameter dictionaries for Single-Series vs. Multi-Series evaluation
 RESIDUAL_DETECTOR_CONFIGS: Dict[str, Dict[str, Dict[str, Any]]] = {
@@ -151,7 +151,9 @@ def evaluate_residual_detector(
             print(f"Error processing {dataset}: {e}")
             continue
 
-        detected_indices = [alert["index"] for alert in alerts]
+        # an alarm counts from the position at which it is known, the end of its STL block, and a block gives at most
+        # one alarm (as the alarms of stream B); the raising position is `index`
+        detected_indices = sorted({alert["known_index"] for alert in alerts})
 
         if ground_truth_cp is not None:
             ground_truth_cps = [ground_truth_cp] if isinstance(ground_truth_cp, int) else ground_truth_cp
@@ -162,11 +164,14 @@ def evaluate_residual_detector(
 
         metrics = score_alerts_for_series(
             detected_indices=detected_indices,
-            level=level,
+            level=2 if level == 0 else level,  # level 0 is scored like level 2 (a change point without a change)
             n_samples=n_samples,
             ground_truth_cps=ground_truth_cps,
             tolerance_window=tolerance_window,
         )
+
+        if item.get("annotations_all"):
+            metrics["f1_tcpd"] = tcpd_f1(detected_indices, item["annotations_all"])
 
         results.append({
             "dataset": dataset,

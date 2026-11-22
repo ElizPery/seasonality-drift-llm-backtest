@@ -64,6 +64,17 @@ class ResidualConformalDriftDetector:
 
         return residuals
 
+    def known_index(self, i: int, n: int) -> int:
+        """Position from which an alarm raised at position `i` of a series of `n` values is known. The residuals of a
+        block come from one STL fit on the values up to the end of the block (the first max(2p, w) values form the
+        warm-up block), so the check of position `i` uses the values up to the end of its block. Stream B dates its
+        alarms the same way (`block_end` in src/recommendations/alarms.py)."""
+        first = max(2 * self.period, self.cal_window)
+        if n <= first:
+            return n - 1
+        end = first if i < first else first + ((i - first) // self.causal_step + 1) * self.causal_step
+        return min(end, n) - 1
+
     def fit_predict(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
         values = df["value"].astype(float).values
         timestamps = df["timestamp"].values if "timestamp" in df.columns else np.arange(len(values))
@@ -126,6 +137,7 @@ class ResidualConformalDriftDetector:
             if (consecutive_violations >= self.min_consecutive) and ((i - last_alert_idx) >= self.cooldown_steps):
                 alerts.append({
                     "index": i,
+                    "known_index": self.known_index(i, n),
                     "timestamp": str(timestamps[i]),
                     "residual": float(current_res),
                     "score": float(current_score),

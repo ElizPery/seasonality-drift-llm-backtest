@@ -79,3 +79,30 @@ def score_alerts_for_series(
         "detection_delay": detection_delay,
         "detected": detected,
     }
+
+
+def _true_positives(change_points, detections, margin: int) -> set:
+    """Change points matched one to one to a detection at most `margin` positions away, the closest first (as in
+    TCPDBench)."""
+    left = set(int(x) for x in detections)
+    matched = set()
+    for cp in sorted(int(c) for c in change_points):
+        close = sorted((abs(cp - x), x) for x in left if abs(cp - x) <= margin)
+        if close:
+            matched.add(cp)
+            left.remove(close[0][1])
+    return matched
+
+
+def tcpd_f1(detected_indices, annotations: dict, margin: int = 5) -> float:
+    """F1 score of the TCPD benchmark (van den Burg and Williams, 2020) against all annotators of a series:
+    precision against the union of the annotations, recall averaged over the annotators, a detection counts within
+    `margin` positions on either side, and position 0 is a change point of every set, as in TCPDBench."""
+    sets = [set(int(c) for c in cps) | {0} for cps in annotations.values()]
+    if not sets:
+        return float("nan")
+    detections = set(int(x) for x in detected_indices) | {0}
+    union = set().union(*sets)
+    precision = len(_true_positives(union, detections, margin)) / len(detections)
+    recall = float(np.mean([len(_true_positives(s, detections, margin)) / len(s) for s in sets]))
+    return 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)

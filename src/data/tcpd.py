@@ -39,6 +39,16 @@ def load_tcpd_series(name: str = "jfk_passengers", frequency: str = "1min", raw_
     return df[["timestamp", "value"]]
 
 
+def load_tcpd_annotations(name: str, raw_dir: str | Path = TCPD_DIR) -> dict[str, list[int]]:
+    """The change points of every annotator of one TCPD series, by annotator key (an annotator who marked no change
+    has an empty list)."""
+    with open(Path(raw_dir) / "annotations.json", "r") as f:
+        annotations = json.load(f)
+    if name not in annotations:
+        raise ValueError(f"Dataset '{name}' not found in annotations.json")
+    return {str(k): [int(c) for c in v] for k, v in annotations[name].items() if isinstance(v, list)}
+
+
 def load_tcpd_annotated_series(name: str = "jfk_passengers", frequency: str = "1min", annotator_key: str | None = None,
                                raw_dir: str | Path = TCPD_DIR) -> tuple[pd.DataFrame, list[int]]:
     """The series and the change point positions of one annotator (`annotator_key`), or the union of all

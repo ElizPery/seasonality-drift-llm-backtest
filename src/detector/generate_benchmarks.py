@@ -5,7 +5,7 @@ Supports a 3-Level Benchmark Architecture:
 
 - Level 1: Drift-free clean baselines (Alibaba, UCI Electricity, TCPD, SeisBench) for FAR evaluation.
 - Level 2: Controlled Semi-Synthetic Drift Injections (Alibaba & UCI Electricity)
-- Level 3: Real-world TCPD and SeisBench benchmarks with consensus ground-truth annotations
+- Level 3: Real-world TCPD and SeisBench benchmarks with change points marked by human annotators
 """
 
 import json
@@ -14,6 +14,7 @@ from typing import Dict, Any, List
 
 import pandas as pd
 
+from src.data.tcpd import load_tcpd_annotations
 from src.detector.data_loader import DataLoader
 from src.detector.drift_generator import DriftGenerator
 
@@ -178,7 +179,7 @@ def generate_all_benchmarks(data_dir: str = "data"):
                 "dataset_name": f"tcpd_{tcpd_name}",
                 "level": 3,
                 "filename": level3_filename,
-                "drift_type": "real_consensus_annotation",
+                "drift_type": "real_annotated_change",
                 "magnitude_sigma": None,
                 "change_point_indices": ground_truth_cps,
                 "change_point_timestamps": gt_timestamps,
@@ -314,6 +315,23 @@ def generate_multi_series_benchmarks(datasets: Dict[str, Dict[str, Any]], data_d
             if ds_name in ["Alibaba", "UCI_Electricity"]:
                 change_idx = len(raw_df) // 2  # Change point placed at 50% length[cite: 21]
 
+                # Level 0, the reference of level 2: the same series without an injected change, scored against the
+                # same position, gives the share of "detections" that a detector makes there by chance
+                placebo_filename = f"level0_placebo_{ds_name}_{series_id}.csv"
+                generator.df.to_csv(processed_dir / placebo_filename, index=False)
+                metadata_catalog.append({
+                    "dataset_name": ds_name,
+                    "series_id": str(series_id),
+                    "level": 0,
+                    "filename": placebo_filename,
+                    "drift_type": "none",
+                    "magnitude_sigma": 0.0,
+                    "change_point_idx": change_idx,
+                    "seasonality_period": period,
+                    "seasonality_strength": seas_strength,
+                    "seasonality_group": seas_group,
+                })
+
                 for d_type in drift_types:
                     for mag in magnitudes:
                         try:
@@ -364,7 +382,7 @@ def generate_multi_series_benchmarks(datasets: Dict[str, Dict[str, Any]], data_d
                     "series_id": str(series_id),
                     "level": 3,
                     "filename": level3_filename,
-                    "drift_type": "real_consensus_annotation" if ds_name == "TCPD" else "seismic_single_wave_arrival",
+                    "drift_type": "real_annotated_change" if ds_name == "TCPD" else "seismic_single_wave_arrival",
                     "magnitude_sigma": None,
                     "change_point_indices": ground_truth_cps,
                     "change_point_timestamps": gt_timestamps,
@@ -372,6 +390,13 @@ def generate_multi_series_benchmarks(datasets: Dict[str, Dict[str, Any]], data_d
                     "seasonality_strength": seas_strength,
                     "seasonality_group": seas_group,
                 })
+                if ds_name == "TCPD":
+                    # every annotator, for the F1 score of the TCPD benchmark (scoring.tcpd_f1)
+                    try:
+                        metadata_catalog[-1]["annotations_all"] = load_tcpd_annotations(
+                            str(series_id), raw_dir=Path(data_dir) / "raw" / "tcpd")
+                    except (FileNotFoundError, ValueError) as e:
+                        print(f"    [Level 3] No annotations of all annotators for {series_id}: {e}")
                 print(f"    [Level 3] Saved annotated series ({len(ground_truth_cps)} change points) -> {level3_filename}")
 
     # Save comprehensive benchmark manifest
